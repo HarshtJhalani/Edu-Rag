@@ -124,3 +124,8 @@ rp\Scripts\python.exe -m pytest
 - Memory lasts within one chat (last 4 messages + follow-up rewriting); persistent memory across sessions and a
   learner profile of weak topics are future work.
 - OCR occasionally misreads decorative slide layouts; the vision model's output is capped to stop runaway transcriptions.
+
+## License
+
+Code: MIT, see [LICENSE](LICENSE). Course material used during development (lecture slides, papers) belongs to its
+authors and is not included in this repository.
