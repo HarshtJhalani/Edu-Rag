@@ -1,0 +1,29 @@
+# core
+numpy
+requests
+psutil
+
+# ingestion + OCR
+pymupdf
+rapidocr_onnxruntime
+
+# indexing + retrieval
+chromadb
+rank_bm25
+sentence-transformers
+
+# web "Go deeper"
+ddgs
+trafilatura
+
+# UI
+streamlit
+
+# dev
+ipykernel
+nbconvert
+pytest
+# Office readers
+python-pptx
+python-docx
+nbformat

@@ -1,0 +1,148 @@
+"""Router (notebook 06), the adaptive part: classify the message, then pick the retrieval strategy."""
+import json
+import re
+import time
+
+from . import config, generate, index, ollama_client, retrieve
+
+ROUTER_TYPES = ["definition", "conceptual", "compare", "followup", "chitchat"]
+CHITCHAT_REPLIES = {
+    "greeting": "Hi! Ask me anything about your course materials.",
+    "thanks": "Glad it helped. Ask another question whenever you like.",
+    "bye": "Bye! Good luck with your studies.",
+    "other": "I can only help with questions about your course materials. Try asking about a topic from your slides.",
+}
+GREETING = re.compile(r"^(hi+|hello|hey|good (morning|afternoon|evening)|hello there)\W*$", re.I)
+THANKS = re.compile(r"^(thanks?|thank you|thx|ok(ay)?,? thanks?)\b", re.I)
+BYE = re.compile(r"^(ok(ay)?\W*)?(bye|goodbye|see you|cya)\W*$", re.I)
+DEFINITION = re.compile(r"^(what\s+(is|are)|what's|define|meaning of)\s+(an?\s+|the\s+)?(?P<term>[^?]+?)\??$", re.I)
+REFERS_BACK = re.compile(r"\b(it|its|this|that|these|those|they|them|one|other|another)\b", re.I)
+COMPARE_WORDS = re.compile(r"\b(differ|difference|vs\.?|versus|compare|compared|better than|instead of)\b", re.I)
+
+ROUTER_PROMPT = """You route a student's message in a study assistant for their course materials.
+Return JSON only: {"type": ..., "standalone_query": ..., "sub_queries": [...]}
+
+type is one of:
+- "definition": asks what a single term or concept is.
+- "conceptual": asks how or why something works, steps, uses, problems, or a how-to about code.
+- "compare": asks for the difference or relationship between two or more things.
+- "followup": depends on the earlier conversation to make sense (uses words like it, that, this, the other, them).
+- "chitchat": greetings, small talk, or anything unrelated to studying (weather, jokes, news, the assistant itself).
+
+standalone_query: the message rewritten so it makes sense with no history (replace it/that/this with what they refer to). Keep every name, term and title from the message exactly as written. For chitchat repeat the message.
+sub_queries: for "compare", one short standalone question per thing being compared. Otherwise [].
+For a followup that is itself a comparison, still use type "followup" and also fill sub_queries."""
+
+
+def title_vocab(chunks=None):
+    """Words of slide titles. Slide text is too broad: it has examples like 'Today it is cloudy'."""
+    chunks = chunks if chunks is not None else retrieve.load_state()["chunks"]
+    return {t for c in chunks for t in index.tokenize(c["title"])}
+
+
+def in_materials(term, vocab):
+    words = [w for w in index.tokenize(term) if len(w) > 2]
+    return bool(words) and all(w in vocab for w in words)
+
+
+def rule_route(message, vocab):
+    """Greetings/thanks/bye -> chitchat; short 'what is X' with X in slide titles -> definition; else None (LLM)."""
+    m = message.strip()
+    for pat, kind in ((GREETING, "greeting"), (THANKS, "thanks"), (BYE, "bye")):
+        if pat.search(m):
+            return {"type": "chitchat", "chitchat_kind": kind, "standalone_query": m, "sub_queries": []}
+    d = DEFINITION.match(m)
+    if (d and len(m.split()) <= 8 and not COMPARE_WORDS.search(m) and in_materials(d.group("term"), vocab)
+            and not REFERS_BACK.search(d.group("term"))):
+        return {"type": "definition", "standalone_query": m, "sub_queries": []}
+    return None
+
+
+def history_text(history):
+    lines = [f"{m['role']}: {m['content'][:300]}" for m in list(history)[-config.MAX_HISTORY_MESSAGES:]]
+    return "\n".join(lines) if lines else "(no earlier conversation)"
+
+
+def parse_route(raw, message):
+    """Validate the router's JSON; on anything unexpected fall back to a conceptual search on the raw message."""
+    try:
+        out = json.loads(raw)
+        assert out.get("type") in ROUTER_TYPES
+        out["standalone_query"] = str(out.get("standalone_query") or message).strip()
+        out["sub_queries"] = [str(s).strip() for s in (out.get("sub_queries") or []) if str(s).strip()][:3]
+        out["parse_ok"] = True
+    except (ValueError, AssertionError, AttributeError, TypeError):
+        out = {"type": "conceptual", "standalone_query": message, "sub_queries": [], "parse_ok": False}
+    return out
+
+
+def llm_route(message, history=(), model=None):
+    msgs = [{"role": "system", "content": ROUTER_PROMPT},
+            {"role": "user", "content": f"Earlier conversation:\n{history_text(history)}\n\nMessage: {message}"}]
+    raw, stats = ollama_client.chat(msgs, model=model, json_mode=True, temperature=0)
+    return dict(parse_route(raw, message), router_seconds=stats["seconds"])
+
+
+def fix_route(r, message, history, vocab):
+    """Guards on the LLM's decision:
+    - no history -> nothing to resolve, so search with the student's own words (the LLM once turned
+      'What does my note Meow Laadle say?' into 'What does the note say?');
+    - 'chitchat' for a message whose words name one of the student's sources is a course question
+      (unknown coined names look like small talk to the LLM)."""
+    r = dict(r)
+    if not history and r["type"] != "compare":
+        r["standalone_query"] = message
+    if r["type"] == "chitchat" and in_materials(message, vocab):
+        r.update(type="definition", standalone_query=message, overridden="chitchat")
+    return r
+
+
+def route(message, history=(), vocab=None, model=None):
+    vocab = vocab if vocab is not None else title_vocab()
+    r = rule_route(message, vocab)
+    if r:
+        return dict(r, by="rule", router_seconds=0.0, parse_ok=True)
+    return dict(fix_route(llm_route(message, history, model), message, history, vocab), by="llm")
+
+
+def interleave(lists, limit):
+    """One from each list in turn, no duplicates: both sides of a comparison reach the LLM."""
+    merged, seen = [], set()
+    for i in range(max(map(len, lists), default=0)):
+        for lst in lists:
+            if i < len(lst) and lst[i]["chunk_id"] not in seen:
+                merged.append(lst[i])
+                seen.add(lst[i]["chunk_id"])
+    return merged[:limit]
+
+
+def retrieve_for_route(r, roles=None, sources=None):
+    """definition k=4, conceptual k=8, compare = per sub-query and merged, followup = standalone rewrite."""
+    if r["type"] == "compare" or (r["type"] == "followup" and len(r["sub_queries"]) >= 2):
+        lists, tops = [], []
+        for sq in r["sub_queries"] or [r["standalone_query"]]:
+            p, top, _ = retrieve.retrieve(sq, k=config.K_PER_SUBQUERY, roles=roles, sources=sources)
+            lists.append(p)
+            tops.append(top)
+        return interleave(lists, config.MAX_COMPARE_PASSAGES), max(tops, default=0.0)
+    p, top, _ = retrieve.retrieve(r["standalone_query"], k=config.K_BY_TYPE.get(r["type"], config.K), roles=roles, sources=sources)
+    return p, top
+
+
+def adaptive_answer(message, history=(), style="concise", roles=None, sources=None, model=None, on_token=None, on_route=None):
+    """on_route(route) is called once the strategy is known (the app shows it); on_token streams the answer."""
+    t0 = time.time()
+    r = route(message, history, model=model)
+    if on_route:
+        on_route(r)
+    if r["type"] == "chitchat":
+        res = generate.empty_result(message, style)
+        res.update(abstained=True, abstain_reason="chitchat", answer=CHITCHAT_REPLIES[r.get("chitchat_kind", "other")])
+    else:
+        passages, top = retrieve_for_route(r, roles, sources)
+        # The answer step sees the standalone question, so follow-ups are answered about the right thing.
+        res = generate.generate(r["standalone_query"], passages, top, style, history, model, on_token)
+        res["question"] = message
+    res["route"] = r
+    res["seconds"] = round(time.time() - t0, 2)
+    return res

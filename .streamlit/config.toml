@@ -1,0 +1,10 @@
+[theme]
+primaryColor = "#6366F1"
+font = "sans serif"
+baseRadius = "0.6rem"
+
+[server]
+maxUploadSize = 400
+
+[client]
+toolbarMode = "minimal"

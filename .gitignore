@@ -1,0 +1,46 @@
+# --- Environment (rebuild with: pip install -r requirements.txt) ---------------
+rp/
+.venv/
+venv/
+env/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Course material: copyrighted (university slides, papers) and large ----------
+Corpus/
+*.pdf
+*.pptx
+*.docx
+*.ppt
+*.doc
+
+# --- The student's library and everything rebuilt from it --------------------------
+# data/library = uploaded material + extracted text; data/index and data/cache are rebuilt
+# automatically (index.sync(), web cache) and hold slide text.
+data/library/
+data/index/
+data/cache/
+data/*.pdf
+
+# --- Personal / machine-specific -----------------------------------------------------
+data/app_settings.json
+.claude/
+CLAUDE.md
+*.log
+.env
+.env.*
+*.local.json
+
+# --- Editors / OS -------------------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Kept on purpose: data/eval/ (eval questions + results = evidence for the report),
+# notebooks/, src/, app_pages/, tests/, scripts/, .streamlit/, start.bat.
+# data/eval/mixed_test.pdf is excluded by the *.pdf rule above (made from a lecture deck).

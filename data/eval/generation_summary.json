@@ -1,0 +1,12 @@
+{
+  "llm": "qwen2.5:7b-instruct",
+  "retrieval": "dense | bge-m3",
+  "abstain": "LLM insufficient + dense floor",
+  "dense_floor": 0.45,
+  "n": 68,
+  "answered_answerable": 1.0,
+  "abstained_unanswerable": 1.0,
+  "citations_ok": 1.0,
+  "cites_gold": 0.9038461538461539,
+  "mean_seconds": 5.772647058823529
+}
