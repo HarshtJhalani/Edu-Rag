@@ -14,10 +14,16 @@ and nothing leaves the machine unless the student presses **Go deeper**.
 | **Adaptive router** | Classifies each message (definition, explanation, comparison, follow-up, small talk) and picks the retrieval strategy: compare questions are split into sub-queries, follow-ups are rewritten using the chat history. |
 | **Honest abstaining** | "Your materials don't cover this." when the model finds the passages insufficient or the question is off-topic. |
 | **Go deeper (opt-in)** | Searches Wikipedia/DuckDuckGo, prefers trusted sites, answers with `[W#]` links and a "confirmed by 2 sources" badge, kept separate from the grounded answer. Pages can be added to the library. |
+| **Flashcards** | Cards written from the slides, reviewed with spaced repetition (Leitner boxes: known cards come back after 1, 2, 4, 8, 16 days; missed ones the same day). |
+| **Exam mode** | A timed mock paper: past-paper questions first (optionally only chosen syllabus units), topped up with exam-style questions from the slides. Auto-submits when time runs out; each answer is marked out of its marks with feedback and a model answer citing the slides. |
+| **Question-paper generator** | Learns the pattern of the student's previous-year papers (sections, marks, "attempt any N"), charts which topics they ask most, and writes a NEW paper in that pattern from the slides, weighted towards frequent topics. PDF paper, PDF answer key citing slide pages, or a timed attempt in Exam mode. |
 | **Practice quiz** | Multiple-choice and short-answer questions written from the student's slides, marked with feedback and the source slide. |
 | **Cheat sheet** | Revision notes for a deck or topic, every point with its page; download as Markdown or PDF. |
 | **Syllabus scope** | Units and topics read from the syllabus; questions tagged with their unit or flagged "outside your syllabus"; coverage view shows which topics have no material yet. |
 | **Past papers** | Shows when a topic was asked in a previous-year paper, with the paper and page. |
+| **Answer tools** | Copy an answer with its sources, rate it 👍/👎 (saved locally), and from any cited slide: "Explain this slide" or "Flashcards from it". The Library shows the questions asked most about each source. |
+| **Chat history + export** | Earlier chats of the session in the sidebar; download a chat as Markdown or PDF with every cited page. |
+| **Light / dark theme** | Light, Dark or Auto (follows Windows) from the sidebar, switched live and remembered. |
 | **Many formats** | PDF (text layer + OCR for scans and screenshots), PowerPoint, Word, Jupyter notebooks, pasted notes. |
 
 ## Requirements
@@ -65,6 +71,7 @@ Evaluated on 68 questions written from 10 lecture decks (52 answerable, 16 not c
 | What | Result |
 |---|---|
 | Best retrieval (04) | dense search with `bge-m3`: nDCG@5 0.809, Recall@5 0.880 (beat nomic-embed-text, qwen3-embedding, BM25 and hybrid RRF) |
+| Full corpus (51 sources, ~2,600 passages) | hybrid BM25 + dense beats dense: gold slide found 0.904 → 0.942, hard-question recall 0.739 → 0.784, cites a gold page 0.86–0.88 → 0.904, 52/52 answered, same 2.3 s; the app now uses hybrid |
 | Reranker reordering (04) | hurt every dense configuration (nDCG@5 0.809 → 0.724), so it is off |
 | Answerable questions answered | 52 / 52 |
 | Unanswerable questions refused | 15 / 16 |
@@ -88,7 +95,8 @@ Design decisions the data changed (details in the notebooks):
 
 ```
 app.py                 Streamlit entry point: setup check + navigation
-app_pages/             UI pages: chat, library, cheat sheet, quiz, syllabus
+app_pages/             UI pages: chat, flashcards, quiz, exam, question paper, cheat sheet, syllabus, library
+assets/                logo and icon
 src/edu_rag/           the system (plain functions, no classes)
   config.py            every setting in one place
   ingest.py, readers.py      PDF + OCR, PowerPoint, Word, Jupyter, pasted text
@@ -101,6 +109,11 @@ src/edu_rag/           the system (plain functions, no classes)
   web.py               Go deeper
   previews.py          highlighted page images
   cheatsheet.py, quiz.py, syllabus.py
+  flashcards.py        cards + Leitner spaced repetition (deck in data/study/)
+  exam.py              mock papers from past papers + slides, examiner-style marking
+  paper.py             question-paper generator: pattern, topic frequency, new paper, answer key
+  activity.py          asked questions and answer ratings (data/study/)
+  export.py            chat -> Markdown / PDF, shared HTML -> PDF writer
   setup_check.py       first-launch checks
 notebooks/             01-07: prototypes and evaluations (historical; written before data/ was reorganised)
 tests/                 pytest, no Ollama needed
@@ -108,13 +121,20 @@ scripts/               one-off maintenance (library migration)
 data/eval/             evaluation questions and results
 ```
 
-Created at runtime and not in the repository: `data/library/` (your material), `data/index/` and `data/cache/`
-(rebuilt automatically).
+Created at runtime and not in the repository: `data/library/` (your material), `data/study/` (your flashcard
+progress), `data/index/` and `data/cache/` (rebuilt automatically). `data/eval/sample_papers/` holds two SAMPLE past papers written for testing the paper
+generator (not real university papers; PDFs are not committed).
 
 ## Tests
 
 ```bash
 rp\Scripts\python.exe -m pytest
+```
+
+The 68-question evaluation runs through the app's own pipeline on whatever is in the library:
+
+```bash
+rp\Scripts\python.exe scriptsun_eval.py my_run
 ```
 
 ## Limitations and future work
@@ -123,6 +143,11 @@ rp\Scripts\python.exe -m pytest
 - The unanswerable set has 16 questions; the "insufficient context" signal needs a larger test.
 - Memory lasts within one chat (last 4 messages + follow-up rewriting); persistent memory across sessions and a
   learner profile of weak topics are future work.
+- Exam marking by the 7B model is strict: complete answers often get 60-80 % of the marks. Use the feedback and model
+  answer, not the score alone. Ranking is sensible (wrong or blank answers get 0).
+- The paper generator was tested on two sample papers written for testing, not on real university papers. With few past
+  papers, topic frequencies are small counts; questions are checked against their slide (>= 30 % of their content words).
+- Chat history lasts until the app is closed (export a chat to keep it).
 - OCR occasionally misreads decorative slide layouts; the vision model's output is capped to stop runaway transcriptions.
 
 ## License

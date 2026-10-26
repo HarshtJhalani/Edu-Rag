@@ -1,7 +1,9 @@
 """Router (notebook 06), the adaptive part: classify the message, then pick the retrieval strategy."""
 import json
+import math
 import re
 import time
+from collections import Counter
 
 from . import config, generate, index, ollama_client, retrieve
 
@@ -10,6 +12,7 @@ CHITCHAT_REPLIES = {
     "greeting": "Hi! Ask me anything about your course materials.",
     "thanks": "Glad it helped. Ask another question whenever you like.",
     "bye": "Bye! Good luck with your studies.",
+    "unclear": "I couldn't make sense of that. Check the spelling, or ask a question about your course materials.",
     "other": "I can only help with questions about your course materials. Try asking about a topic from your slides.",
 }
 GREETING = re.compile(r"^(hi+|hello|hey|good (morning|afternoon|evening)|hello there)\W*$", re.I)
@@ -34,6 +37,9 @@ sub_queries: for "compare", one short standalone question per thing being compar
 For a followup that is itself a comparison, still use type "followup" and also fill sub_queries."""
 
 
+_CHARS = {}
+
+
 def title_vocab(chunks=None):
     """Words of slide titles. Slide text is too broad: it has examples like 'Today it is cloudy'."""
     chunks = chunks if chunks is not None else retrieve.load_state()["chunks"]
@@ -56,6 +62,44 @@ def rule_route(message, vocab):
             and not REFERS_BACK.search(d.group("term"))):
         return {"type": "definition", "standalone_query": m, "sub_queries": []}
     return None
+
+
+def char_model(words):
+    """Character-trigram counts over the corpus words: what words in these materials look like."""
+    tri, bi = Counter(), Counter()
+    for w in words:
+        s = f"^^{w}$"
+        for i in range(2, len(s)):
+            tri[s[i - 2:i + 1]] += 1
+            bi[s[i - 2:i]] += 1
+    return tri, bi
+
+
+def corpus_char_model():
+    st = retrieve.load_state()
+    if _CHARS.get("terms") is not st["terms"]:      # rebuilt whenever the index is reloaded
+        words = [w for w in st["terms"]["df"] if re.fullmatch(r"[a-z]{2,20}", w)]
+        _CHARS.update(terms=st["terms"], model=char_model(words))
+    return st["terms"]["df"], _CHARS["model"]
+
+
+def word_score(word, model, alphabet=28):
+    """Mean log-probability of the word's letters under the trigram model (add-0.1 smoothing)."""
+    tri, bi = model
+    s = f"^^{word}$"
+    lp = [math.log((tri[s[i - 2:i + 1]] + 0.1) / (bi[s[i - 2:i]] + 0.1 * alphabet)) for i in range(2, len(s))]
+    return sum(lp) / len(lp)
+
+
+def is_gibberish(message, known=None, model=None):
+    """True for a keyboard mash: no word of the message occurs in the materials, and its letters look unlike them."""
+    if known is None or model is None:
+        known, model = corpus_char_model()
+    words = [w for w in re.findall(r"[a-z]+", message.lower()) if len(w) >= config.GIBBERISH_MIN_LEN]
+    if not words or any(w in known for w in words):
+        return False
+    score = sum(word_score(w, model) * len(w) for w in words) / sum(len(w) for w in words)
+    return score < config.GIBBERISH_MAX_SCORE
 
 
 def history_text(history):
@@ -102,6 +146,9 @@ def route(message, history=(), vocab=None, model=None):
     r = rule_route(message, vocab)
     if r:
         return dict(r, by="rule", router_seconds=0.0, parse_ok=True)
+    if is_gibberish(message):
+        return {"type": "chitchat", "chitchat_kind": "unclear", "standalone_query": message, "sub_queries": [],
+                "by": "gibberish", "router_seconds": 0.0, "parse_ok": True}
     return dict(fix_route(llm_route(message, history, model), message, history, vocab), by="llm")
 
 

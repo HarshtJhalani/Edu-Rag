@@ -1,7 +1,7 @@
 """📚 Library: add files and notes, choose which sources answers may use, remove sources."""
 import streamlit as st
 
-from edu_rag import chunking, config, index, ingest, previews
+from edu_rag import activity, chunking, config, index, ingest, previews
 
 from . import common
 
@@ -52,12 +52,16 @@ def source_rows(model):
     for c in chunking.load_chunks():
         counts[c["source_id"]] = counts.get(c["source_id"], 0) + 1
     excluded = common.excluded()
+    asked = activity.most_asked()
     for role in config.ROLES:
         group = [s for s in srcs if s["role"] == role]
         if not group:
             continue
-        st.markdown(f"#### {common.ROLE_LABELS[role]} ({len(group)})")
-        with st.container(border=True):
+        # The label stays the same while ticking boxes, so Streamlit keeps the section open across reruns.
+        icon = {"textbook": "📚", "note": "🗒️", "web": "🌐", "pyq": "📝", "syllabus": "🗺️"}.get(role, "📄")
+        removing = any(s["source_id"] == st.session_state.get("confirm_remove") for s in group)
+        with st.expander(f"{icon} **{common.ROLE_LABELS[role]}** ({len(group)})", expanded=removing):
+            count = st.empty()                      # filled after the checkboxes below have updated `excluded`
             for s in group:
                 sid = s["source_id"]
                 c1, c2, c3 = st.columns([0.6, 7, 0.8])
@@ -69,6 +73,10 @@ def source_rows(model):
                 c2.markdown(f"{common.KIND_ICONS.get(s.get('kind') or 'pdf', '📄')} **{s['name']}**  \n"
                             f"<span class='small-muted'>{size}{' · ' if size else ''}{counts.get(sid, 0)} chunks"
                             f"{' · ' + s['url'] if s.get('url') else ''}</span>", unsafe_allow_html=True)
+                if asked.get(sid):
+                    c2.markdown("<span class='small-muted'>🔥 Most asked: " + " · ".join(
+                        f"{common.esc(q[:70])}{f' ({n}×)' if n > 1 else ''}" for q, n in asked[sid]) + "</span>",
+                        unsafe_allow_html=True)
                 if c3.button("🗑️", key=f"rm_{sid}", help="Remove this source and its files", use_container_width=True):
                     st.session_state.confirm_remove = sid
                 if st.session_state.get("confirm_remove") == sid:
@@ -83,15 +91,19 @@ def source_rows(model):
                     if b.button("Cancel", key=f"no_{sid}"):
                         st.session_state.pop("confirm_remove")
                         st.rerun()
+            count.caption(f"{sum(s['source_id'] not in excluded for s in group)} of {len(group)} in use")
     common.set_pref("excluded", sorted(excluded))
 
 
 def page():
-    st.markdown(common.CSS, unsafe_allow_html=True)
     model = st.session_state["model"]
-    st.title("📚 Library")
-    st.caption(f"Everything you add is kept in {config.LIBRARY_DIR}, one folder per source.")
-    t1, t2 = st.tabs(["Add files", "Paste a note"])
+    common.page_start("📚", "Library", f"Everything you add is kept in <code>{config.LIBRARY_DIR}</code>, one folder per source. "
+                      "Untick a source to leave it out of answers, quizzes and cheat sheets.")
+    srcs = common.sources()
+    roles = [s["role"] for s in srcs]
+    common.stats_row([(roles.count("textbook"), "slide decks & books"), (roles.count("note"), "notes"), (roles.count("web"), "web pages"),
+                      (roles.count("pyq"), "past papers"), (len(chunking.load_chunks()), "passages")])
+    t1, t2 = st.tabs(["➕ Add files", "🗒️ Paste a note"])
     with t1:
         upload_box(model)
     with t2:

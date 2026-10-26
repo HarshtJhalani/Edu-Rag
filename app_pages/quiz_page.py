@@ -18,14 +18,15 @@ def setup_form(srcs, model):
             chosen = []
         n = st.slider("Number of questions", 3, 10, 5)
         ready = (mode == "Chosen decks" and chosen) or (mode == "A topic" and (topic or "").strip())
-        if st.button("Start quiz", type="primary", disabled=not ready):
-            bar = st.progress(0.0, text="Writing questions from your slides...")
+        if st.button("Start quiz", type="primary", disabled=not ready or common.running("quiz")):
             ids = [s["source_id"] for s in chosen] or common.evidence_filter()
-            qs = quiz.make(n=n, source_ids=ids, topic=topic.strip() if topic else None, model=model,
-                           progress=lambda i, total: bar.progress(min(i / total, 1.0), text=f"Writing questions: {i} of {total}"))
-            bar.empty()
-            st.session_state.quiz = {"questions": qs, "marks": None}
+            topic_ = topic.strip() if topic else None
+            common.start_job("quiz", "Quiz",
+                             lambda progress: quiz.make(n=n, source_ids=ids, topic=topic_, model=model,
+                                                        progress=lambda i, t: progress(i, t, f"{i} of {t} questions written")),
+                             lambda qs: st.session_state.update(quiz={"questions": qs, "marks": None}))
             st.rerun()
+    common.job_progress("quiz")
 
 
 def show_questions(qz, model):
@@ -71,10 +72,8 @@ def show_results(qs, marks):
 
 
 def page():
-    st.markdown(common.CSS, unsafe_allow_html=True)
     model = st.session_state["model"]
-    st.title("🎯 Practice quiz")
-    st.caption("Questions written from your own slides. Multiple choice is marked instantly; short answers are marked against the slide.")
+    common.page_start("🎯", "Practice quiz", "Questions written from your own slides. Multiple choice is marked instantly; short answers are marked against the slide.")
     srcs = [s for s in common.sources() if s["role"] in config.EVIDENCE_ROLES and s["source_id"] not in common.excluded()]
     if not srcs:
         st.info("Add slides or notes on the **📚 Library** page first.")

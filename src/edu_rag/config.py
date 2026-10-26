@@ -16,6 +16,10 @@ BM25_FILE = INDEX_DIR / "bm25.pkl"
 WEB_CACHE_DIR = DATA_DIR / "cache" / "web"
 EVAL_DIR = DATA_DIR / "eval"
 APP_SETTINGS_FILE = DATA_DIR / "app_settings.json"
+STUDY_DIR = DATA_DIR / "study"                    # the student's own progress: flashcard boxes
+FLASHCARDS_FILE = STUDY_DIR / "flashcards.json"
+QUESTIONS_LOG = STUDY_DIR / "questions.jsonl"     # asked questions + cited sources ("most asked" in the Library)
+FEEDBACK_LOG = STUDY_DIR / "feedback.jsonl"       # thumbs up/down on answers
 
 ROLES = ["textbook", "note", "web", "pyq", "syllabus"]
 EVIDENCE_ROLES = ["textbook", "note", "web"]      # only these may support an answer
@@ -57,7 +61,9 @@ VISION_MAX_CHARS = 6000
 DUP_RATIO = 0.95
 
 # --- Retrieval (04) -------------------------------------------------------
-RETRIEVAL_METHOD = "dense"                        # dense | bm25 | hybrid; dense won on the eval
+# dense | bm25 | hybrid. Dense won on the 532-passage library (04); on the full 2,600-passage corpus hybrid (BM25 + dense,
+# RRF) found the gold slide more often (hit 0.904 -> 0.942, hard recall 0.739 -> 0.784, all 52 answered) at the same speed.
+RETRIEVAL_METHOD = "hybrid"
 K = 5
 CANDIDATES = 20
 RRF_K = 60
@@ -75,6 +81,12 @@ ABSTAIN_MSG = "Your materials don't cover this."
 K_BY_TYPE = {"definition": 4, "conceptual": 8, "followup": 5}
 K_PER_SUBQUERY = 4
 MAX_COMPARE_PASSAGES = 8
+# Keyboard mashes ("qwertyuiasdfghjkl") never reach the router LLM, which once rewrote one, using the chat history,
+# into a question about the previous answer. A message is unclear when none of its words occur in the materials AND its
+# letters look unlike them: mean character-trigram log-prob (model trained on the corpus words) below this. Real questions,
+# also about topics not in the materials ("what is kubernetes"), scored -2.2 to -3.5; keyboard mashes -3.6 to -4.4.
+GIBBERISH_MAX_SCORE = -3.6
+GIBBERISH_MIN_LEN = 4                             # shorter words (acronyms: bfs, dfs, sql) are not judged
 
 # --- Web (07) -------------------------------------------------------------
 USER_AGENT = "EduRAG-student-project/0.1 (local study assistant)"
@@ -98,6 +110,11 @@ COVERAGE_MIN_SCORE = 0.56                         # topic -> slide cosine; test 
 PYQ_MIN_DENSE = 0.55
 PYQ_MAX_HITS = 3
 
+# --- Flashcards / exam ----------------------------------------------------------
+LEITNER_DAYS = [0, 1, 2, 4, 8, 16]                # box -> days until the card is due again; "knew it" moves a card up a box
+EXAM_DEFAULT_MARKS = 5                            # a past-paper question with no marks printed on it
+EXAM_MARK_K = 5                                   # slide passages the marker gets per question
+
 
 def chunk_settings():
     return {"version": CHUNKER_VERSION, "max_tokens": MAX_TOKENS, "min_body_chars": MIN_BODY_CHARS,
@@ -111,5 +128,5 @@ def chunk_settings_hash(settings=None):
 
 
 def ensure_dirs():
-    for d in (LIBRARY_DIR, INDEX_DIR, CACHE_DIR, CHROMA_DIR, WEB_CACHE_DIR, EVAL_DIR):
+    for d in (LIBRARY_DIR, INDEX_DIR, CACHE_DIR, CHROMA_DIR, WEB_CACHE_DIR, EVAL_DIR, STUDY_DIR):
         d.mkdir(parents=True, exist_ok=True)

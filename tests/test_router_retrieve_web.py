@@ -1,3 +1,7 @@
+import re
+
+import pytest
+
 from edu_rag import index, retrieve, router, web
 
 VOCAB = {"nominal", "attribute", "dbscan", "lambda", "functions", "tuple", "python", "gini", "index"}
@@ -115,3 +119,33 @@ def test_confirmed_needs_two_sites():
 def test_cache_key_depends_on_model_and_settings():
     a = index.cache_path("bge-m3", "f" * 40, "s1")
     assert a != index.cache_path("bge-m3", "f" * 40, "s2") != index.cache_path("nomic-embed-text", "f" * 40, "s1")
+
+
+GIB_TEXT = """A tuple is an ordered collection which cannot be changed once it is created, while a list is mutable.
+The read method reads a string from an open file; the write method writes data and the close method releases it.
+Clustering groups similar objects by a distance measure such as the Euclidean or Manhattan distance. A decision tree
+splits the training data on the attribute with the highest information gain or the lowest Gini index. Neural networks
+learn weights for every layer by gradient descent and backpropagation, and a perceptron updates its weights after each
+example. Python modules are imported with import statements; functions return values and classes define objects.
+Data mining finds frequent patterns, associations and correlations in large databases, and supervised learning uses
+labelled examples to build a classification or regression model that predicts the class of a new instance."""
+GIB_WORDS = re.findall(r"[a-z]+", GIB_TEXT.lower())
+
+
+def test_is_gibberish_flags_keyboard_mashes_only(monkeypatch):
+    # A small vocabulary compresses the scores (real -1.7..-2.0, mashes -3.5..-3.7 here); config's -3.6 is set on
+    # the full corpus, so this test uses a threshold for its own vocabulary.
+    monkeypatch.setattr(router.config, "GIBBERISH_MAX_SCORE", -3.0)
+    known = {w: 1 for w in GIB_WORDS}
+    model = router.char_model(GIB_WORDS)
+    for mash in ("qwertyuiasdfghjklASDFGHJK", "wr[uiw f[piue gofihjeriogue[ripogphjfvieo[rhjv", "sdfsdf fghjkl"):
+        assert router.is_gibberish(mash, known, model), mash
+    for real in ("what is a tuple", "how do I read a file?", "bfs vs dfs", "hi", "2+2", "explain clustering distance"):
+        assert not router.is_gibberish(real, known, model), real
+
+
+def test_gibberish_never_reaches_the_llm(monkeypatch):
+    monkeypatch.setattr(router, "is_gibberish", lambda m: True)
+    monkeypatch.setattr(router, "llm_route", lambda *a, **k: pytest.fail("router LLM called for gibberish"))
+    r = router.route("qwertyuiop", history=[{"role": "user", "content": "How does read() work?"}], vocab=set())
+    assert r["type"] == "chitchat" and r["chitchat_kind"] == "unclear"

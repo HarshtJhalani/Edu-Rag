@@ -3,7 +3,7 @@ The LLM writes bullets citing [S#]; code turns each citation into the real page 
 import re
 import time
 
-from . import chunking, config, generate, ollama_client, retrieve
+from . import chunking, config, export, generate, ollama_client, retrieve
 
 BATCH_TOKENS = 3000                               # passages per LLM call; leaves room in num_ctx for the answer
 TOPIC_K = 8
@@ -112,31 +112,14 @@ def to_markdown(sheet):
     return "\n".join(lines)
 
 
-def _html_escape(s):
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 def to_pdf(sheet):
-    """A printable A4 PDF (PyMuPDF Story: HTML -> PDF). Returns bytes."""
-    import io
-    import pymupdf as fitz
-    parts = [f"<h1>{_html_escape(sheet['title'])}</h1>"]
+    """A printable A4 PDF. Returns bytes."""
+    esc = export.esc
+    parts = [f"<h1>{esc(sheet['title'])}</h1>"]
     for s in sheet["sections"]:
-        parts.append(f"<h2>{_html_escape(s['title'])} <span style='color:#888;font-size:9pt'>({_html_escape(s['source'])}, "
-                     f"{s['pages']})</span></h2><ul>")
+        parts.append(f"<h2>{esc(s['title'])} <span style='color:#888;font-size:9pt'>({esc(s['source'])}, {s['pages']})</span></h2><ul>")
         for b in s["bullets"]:
             refs = "; ".join(p for _, p in b["refs"])
-            parts.append(f"<li>{_html_escape(b['text'])} <i style='color:#888'>({refs})</i></li>")
+            parts.append(f"<li>{esc(b['text'])} <i style='color:#888'>({refs})</i></li>")
         parts.append("</ul>")
-    css = "body{font-family:sans-serif;font-size:10pt} h1{font-size:16pt} h2{font-size:11.5pt;margin-top:8pt} li{margin-bottom:2pt}"
-    story = fitz.Story(html="".join(parts), user_css=css)
-    buf = io.BytesIO()
-    writer = fitz.DocumentWriter(buf)
-    rect, more = fitz.paper_rect("a4"), 1
-    while more:
-        dev = writer.begin_page(rect)
-        more, _ = story.place(rect + (40, 40, -40, -40))
-        story.draw(dev)
-        writer.end_page()
-    writer.close()
-    return buf.getvalue()
+    return export.html_to_pdf("".join(parts))

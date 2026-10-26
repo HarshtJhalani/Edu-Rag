@@ -9,10 +9,8 @@ from . import common
 
 
 def page():
-    st.markdown(common.CSS, unsafe_allow_html=True)
     model = st.session_state["model"]
-    st.title("📝 Cheat sheet")
-    st.caption("Short revision notes from your own materials. Every bullet shows the page it came from.")
+    common.page_start("📝", "Cheat sheet", "Short revision notes from your own materials. Every bullet shows the page it came from.")
     srcs = [s for s in common.sources() if s["role"] in config.EVIDENCE_ROLES]
     if not srcs:
         st.info("Add slides or notes on the **📚 Library** page first.")
@@ -25,14 +23,16 @@ def page():
         else:
             topic = st.text_input("Topic", placeholder="e.g. decision tree attribute selection measures")
             src = None
-        go = st.button("Make cheat sheet", type="primary", disabled=mode == "A topic" and not (topic or "").strip())
+        go = st.button("Make cheat sheet", type="primary",
+                       disabled=(mode == "A topic" and not (topic or "").strip()) or common.running("cheatsheet"))
     if go:
-        bar = st.progress(0.0, text="Reading your slides...")
-        sheet = cheatsheet.make(source_id=src["source_id"] if src else None, topic=topic.strip() if topic else None,
-                                sources=common.evidence_filter(), model=model,
-                                progress=lambda i, n: bar.progress(i / n, text=f"Writing notes: part {i} of {n}"))
-        bar.empty()
-        st.session_state.cheatsheet = sheet
+        sid, topic_, sources = src["source_id"] if src else None, topic.strip() if topic else None, common.evidence_filter()
+        common.start_job("cheatsheet", "Cheat sheet",
+                         lambda progress: cheatsheet.make(source_id=sid, topic=topic_, sources=sources, model=model,
+                                                          progress=lambda i, n: progress(i, n, f"part {i} of {n}")),
+                         lambda sheet: st.session_state.update(cheatsheet=sheet))
+        st.rerun()
+    common.job_progress("cheatsheet")
     sheet = st.session_state.get("cheatsheet")
     if not sheet:
         return

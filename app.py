@@ -1,13 +1,19 @@
 """Edu-RAG: Streamlit app. Run with start.bat (or: streamlit run app.py). Pages live in app_pages/."""
 import subprocess
+from pathlib import Path
 
 import streamlit as st
 
-from app_pages import chat, cheatsheet_page, common, library_page, quiz_page, syllabus_page
+from app_pages import (chat, cheatsheet_page, common, exam_page, flashcards_page, library_page, paper_page, quiz_page,
+                       syllabus_page)
 from edu_rag import config, generate, ollama_client, setup_check
 
-st.set_page_config(page_title="Edu-RAG study assistant", page_icon="📘", layout="wide")
+ASSETS = Path(__file__).parent / "assets"
+
+st.set_page_config(page_title="Edu-RAG study assistant", page_icon=str(ASSETS / "icon.svg"), layout="wide")
 config.ensure_dirs()
+if common.apply_theme(common.pref("theme", "System")):
+    st.rerun()                                    # first run after a server start: this run went out with the old theme
 
 
 def setup_panel(status):
@@ -45,18 +51,34 @@ def setup_panel(status):
 
 
 def sidebar():
-    pages = st.navigation({"Study": [st.Page(chat.page, title="Ask", icon="💬", url_path="ask", default=True),
-                                     st.Page(cheatsheet_page.page, title="Cheat sheet", icon="📝", url_path="cheatsheet"),
-                                     st.Page(quiz_page.page, title="Quiz", icon="🎯", url_path="quiz"),
-                                     st.Page(syllabus_page.page, title="Syllabus", icon="🗺️", url_path="syllabus")],
-                           "Materials": [st.Page(library_page.page, title="Library", icon="📚", url_path="library")]})
+    st.logo(str(ASSETS / "logo.svg"), icon_image=str(ASSETS / "icon.svg"), size="large")
+    p = {"ask": st.Page(chat.page, title="Ask", icon="💬", url_path="ask", default=True),
+         "flashcards": st.Page(flashcards_page.page, title="Flashcards", icon="🃏", url_path="flashcards"),
+         "quiz": st.Page(quiz_page.page, title="Quiz", icon="🎯", url_path="quiz"),
+         "exam": st.Page(exam_page.page, title="Exam mode", icon="⏱️", url_path="exam"),
+         "paper": st.Page(paper_page.page, title="Question paper", icon="📄", url_path="paper"),
+         "cheatsheet": st.Page(cheatsheet_page.page, title="Cheat sheet", icon="📝", url_path="cheatsheet"),
+         "syllabus": st.Page(syllabus_page.page, title="Syllabus", icon="🗺️", url_path="syllabus"),
+         "library": st.Page(library_page.page, title="Library", icon="📚", url_path="library")}
+    st.session_state.pages = p                    # lets a page jump to another (st.switch_page)
+    pages = st.navigation({"Study": [p["ask"], p["flashcards"], p["quiz"], p["exam"], p["paper"], p["cheatsheet"]],
+                           "Course": [p["syllabus"], p["library"]]})
     with st.sidebar:
-        st.divider()
+        st.session_state.sidebar_top = st.container()     # pages put their own sidebar items here (chat history)
+        if common.jobs():
+            common.jobs_sidebar()
         styles = list(generate.STYLES)
         current = common.pref("style", "concise")
         style = st.selectbox("Answer style", styles, index=styles.index(current) if current in styles else 0)
         common.set_pref("style", style)
-        st.caption(f"📘 **Edu-RAG** study assistant  \n{st.session_state['model']} · runs on this computer")
+        modes = list(common.THEMES)
+        mode = st.segmented_control("Theme", modes, default=common.pref("theme", "System"), key="theme_mode",
+                                    format_func={"Light": "☀️ Light", "Dark": "🌙 Dark", "System": "💻 Auto"}.get)
+        if mode and mode != common.pref("theme", "System"):
+            common.set_pref("theme", mode)
+            common.apply_theme(mode)              # before the rerun: its first message carries the theme
+            st.rerun()
+        st.caption(f"🟢 {st.session_state['model']} · runs on this computer")
     return pages
 
 
@@ -68,4 +90,5 @@ if not st.session_state.setup["ready"]:
 
 st.session_state["model"] = st.session_state.setup["llm"]
 common.warm_up()
+common.collect_jobs()                             # results of background jobs reach their pages
 sidebar().run()

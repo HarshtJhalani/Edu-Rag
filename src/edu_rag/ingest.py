@@ -389,8 +389,12 @@ def ingest_pdf(path, role="textbook", use_ocr=True, use_vision=None, progress=No
             elif use_ocr and images:
                 area = page.rect.width * page.rect.height
                 for r in images:
-                    if (r[2] - r[0]) * (r[3] - r[1]) >= config.OCR_IMAGE_MIN_AREA * area:
-                        extra = ocr_page(page, clip=r, use_vision=use_vision)
+                    r = fitz.Rect(r) & page.rect           # pictures can extend past the page edge
+                    if not r.is_empty and r.width * r.height >= config.OCR_IMAGE_MIN_AREA * area:
+                        try:
+                            extra = ocr_page(page, clip=r, use_vision=use_vision)
+                        except fitz.mupdf.FzErrorBase:      # a picture MuPDF cannot render must not lose the document
+                            continue
                         if sum(len(b["text"]) for b in extra) >= config.MIN_OCR_CHARS:
                             for b in extra:
                                 b["from_image"] = True

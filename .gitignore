@@ -23,6 +23,8 @@ Corpus/
 data/library/
 data/index/
 data/cache/
+# the student's flashcard deck and review history
+data/study/
 data/*.pdf
 
 # --- Personal / machine-specific -----------------------------------------------------

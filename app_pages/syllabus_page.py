@@ -7,9 +7,7 @@ from . import common
 
 
 def page():
-    st.markdown(common.CSS, unsafe_allow_html=True)
-    st.title("🗺️ Syllabus coverage")
-    st.caption("Your syllabus topics, and the slides that cover each one. Questions in the chat are also tagged with their unit.")
+    common.page_start("🗺️", "Syllabus coverage", "Your syllabus topics, and the slides that cover each one. Questions in the chat are also tagged with their unit.")
     sylls = [s for s in common.sources() if s["role"] == "syllabus"]
     if not sylls:
         st.info("Upload your syllabus on the **📚 Library** page (choose **Syllabus** as the file type).")

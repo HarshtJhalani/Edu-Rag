@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="168" height="40" viewBox="0 0 168 40">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="36" height="36" rx="10" fill="url(#g)"/>
+  <path d="M11 13.5c3.2-1.4 6.2-1.2 9 .8v13c-2.8-2-5.8-2.2-9-.8z M29 13.5c-3.2-1.4-6.2-1.2-9 .8v13c2.8-2 5.8-2.2 9-.8z"
+        fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+  <text x="47" y="27" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="19" font-weight="700"><tspan fill="#6366F1">Edu</tspan><tspan fill="#A855F7">-RAG</tspan></text>
+</svg>

@@ -32,7 +32,7 @@ def build_messages(question, passages, style="concise", history=(), system=SYSTE
     msgs = [{"role": "system", "content": system}]
     msgs += [{"role": m["role"], "content": m["content"]} for m in list(history)[-config.MAX_HISTORY_MESSAGES:]]
     msgs.append({"role": "user", "content": f"Passages:\n{format_passages(passages, prefix)}\n\n"
-                                            f"Style: {STYLES[style]}\n\nQuestion: {question}"})
+                                            f"Style: {STYLES.get(style, style)}\n\nQuestion: {question}"})
     return msgs
 
 
