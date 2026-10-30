@@ -5,7 +5,8 @@ import time
 
 A4_MARGIN = 40
 PDF_CSS = ("body{font-family:sans-serif;font-size:10pt} h1{font-size:16pt} h2{font-size:11.5pt;margin-top:10pt} "
-           "li{margin-bottom:2pt} .muted{color:#888} .q{font-weight:bold;margin-top:12pt} .src{font-size:8.5pt;color:#666}")
+           "li{margin-bottom:2pt} .muted{color:#888} .q{font-weight:bold;margin-top:12pt} .src{font-size:8.5pt;color:#666} "
+           "pre{font-family:monospace;font-size:8.5pt;background-color:#f3f3f3;padding:4pt;margin:4pt 0}")
 
 
 def esc(s):
@@ -56,9 +57,22 @@ def chat_to_markdown(messages, title=None):
     return "\n".join(lines)
 
 
+FENCE = re.compile(r"```[\w+-]*[ \t]*\n?(.*?)```", re.S)
+
+
 def md_inline_to_html(text):
-    """**bold**, `code` and line breaks; everything else escaped."""
-    t = esc(text)
+    """```code blocks``` (kept as preformatted text), **bold**, `code` and line breaks; everything else escaped."""
+    parts, last = [], 0
+    for m in FENCE.finditer(text):
+        parts.append(_inline(text[last:m.start()]))
+        parts.append(f"<pre>{esc(m.group(1).rstrip())}</pre>")
+        last = m.end()
+    parts.append(_inline(text[last:]))
+    return "".join(parts)
+
+
+def _inline(text):
+    t = esc(text.strip("\n"))
     t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
     t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
     return t.replace("\n", "<br/>")
@@ -72,7 +86,7 @@ def chat_to_pdf(messages, title=None):
             parts.append(f"<p class='q'>Q: {esc(m['content'])}</p>")
             continue
         res = m.get("result") or {}
-        parts.append(f"<p>{md_inline_to_html(m.get('content') or res.get('answer') or '')}</p>")
+        parts.append(f"<div>{md_inline_to_html(m.get('content') or res.get('answer') or '')}</div>")
         if res.get("sources"):
             parts.append("<p class='src'>" + "<br/>".join(esc(source_line(s)) for s in res["sources"]) + "</p>")
         d = m.get("deeper")

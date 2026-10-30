@@ -42,7 +42,15 @@ CLAUDE.md
 Thumbs.db
 desktop.ini
 .DS_Store
+~$*
+*.tmp
+*.bak
 
 # Kept on purpose: data/eval/ (eval questions + results = evidence for the report),
 # notebooks/, src/, app_pages/, tests/, scripts/, .streamlit/, start.bat.
-# data/eval/mixed_test.pdf is excluded by the *.pdf rule above (made from a lecture deck).
+# data/eval/mixed_test.pdf is excluded by the *.pdf rule above (made from a lecture deck);
+# data/eval/sample_papers/ (sample PDFs for the paper generator) and run logs (*.log) likewise.
+
+# --- Research notes and the project report (kept outside the code) -----------------
+research_notes/
+reports/

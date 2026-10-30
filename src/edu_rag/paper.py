@@ -319,7 +319,7 @@ def key_to_pdf(paper, key):
         for q in s["questions"]:
             k = key.get(q["n"]) or key.get(str(q["n"])) or {}
             parts.append(f"<p class='q'>{q['n']}. {export.esc(q['question'])} [{q['marks']}]</p>")
-            parts.append(f"<p>{export.md_inline_to_html(k.get('answer') or '')}</p>")
+            parts.append(f"<div>{export.md_inline_to_html(k.get('answer') or '')}</div>")
             if k.get("sources"):
                 parts.append("<p class='src'>" + "<br/>".join(export.esc(export.source_line(x)) for x in k["sources"]) + "</p>")
     return export.html_to_pdf("".join(parts))

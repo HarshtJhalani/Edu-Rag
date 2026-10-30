@@ -103,7 +103,7 @@ src/edu_rag/           the system (plain functions, no classes)
   chunking.py          one slide = one chunk; code and tables never split
   library.py           data/library/<role>/<source>/ folders
   index.py             embedding cache, Chroma, BM25; sync() keeps them in line with the library
-  retrieve.py          dense / BM25 / RRF, filters, rare-word match, past papers
+  retrieve.py          dense / BM25 / RRF hybrid (default), filters, rare-word match, past papers
   generate.py          prompt, citation checking, support check, abstaining
   router.py            the adaptive router
   web.py               Go deeper
@@ -117,7 +117,7 @@ src/edu_rag/           the system (plain functions, no classes)
   setup_check.py       first-launch checks
 notebooks/             01-07: prototypes and evaluations (historical; written before data/ was reorganised)
 tests/                 pytest, no Ollama needed
-scripts/               one-off maintenance (library migration)
+scripts/               run_eval.py (evaluation), add_corpus.py + corpus_run.bat (bulk import), migrate_library.py
 data/eval/             evaluation questions and results
 ```
 
@@ -134,8 +134,11 @@ rp\Scripts\python.exe -m pytest
 The 68-question evaluation runs through the app's own pipeline on whatever is in the library:
 
 ```bash
-rp\Scripts\python.exe scriptsun_eval.py my_run
+rp\Scripts\python.exe scripts\run_eval.py my_run hybrid
 ```
+
+The last argument picks the retrieval method (`dense`, `bm25` or `hybrid`; default: `RETRIEVAL_METHOD` in
+`config.py`, which is `hybrid`). Results are written to `data/eval/my_run.json`.
 
 ## Limitations and future work
 
