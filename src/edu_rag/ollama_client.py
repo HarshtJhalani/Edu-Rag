@@ -93,12 +93,18 @@ def chat(messages, model=None, json_mode=False, temperature=None, keep_alive="10
                                             "output_tokens": j.get("eval_count", 0)}
 
 
+def is_looping(text):
+    tail = text[-config.LOOP_TAIL_CHARS:]
+    return len(text) >= config.LOOP_TAIL_CHARS * config.LOOP_REPEATS and text.count(tail) >= config.LOOP_REPEATS
+
+
 def chat_stream(messages, model=None, temperature=None, keep_alive="10m", on_token=None):
-    """Like chat(), but calls on_token(piece) as text arrives. Returns (full text, stats)."""
+    """Like chat(), but calls on_token(piece) as text arrives. Returns (full text, stats). Stops as soon as the model starts
+    repeating itself: on a processor the output limit alone would still mean over a minute of the same lines on screen."""
     options = {"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE if temperature is None else temperature,
                "num_predict": config.ANSWER_NUM_PREDICT, **cpu_options()}
     body = {"model": model or config.LLM, "messages": messages, "stream": True, "keep_alive": keep_alive, "options": options}
-    t0, parts, last = time.time(), [], {}
+    t0, parts, last, looped = time.time(), [], {}, False
     with requests.post(_url("/api/chat"), json=body, stream=True, timeout=600) as r:
         r.raise_for_status()
         for line in r.iter_lines():
@@ -110,8 +116,12 @@ def chat_stream(messages, model=None, temperature=None, keep_alive="10m", on_tok
                 parts.append(piece)
                 if on_token:
                     on_token(piece)
+                if "\n" in piece or len(parts) % 10 == 0:
+                    looped = is_looping("".join(parts))
+                    if looped:
+                        break                       # closing the connection makes Ollama stop writing
     return "".join(parts).strip(), {"seconds": round(time.time() - t0, 2), "prompt_tokens": last.get("prompt_eval_count", 0),
-                                    "output_tokens": last.get("eval_count", 0)}
+                                    "output_tokens": last.get("eval_count", 0), "looped": looped}
 
 
 def pull(model):

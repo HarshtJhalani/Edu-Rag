@@ -102,10 +102,13 @@ def only_citations(text, prefix="S"):
     return not re.sub(rf"\[{prefix}\d+\]|\W", "", text)
 
 
-def trim_runaway(text, output_tokens):
-    """An answer that hit the output limit is usually one passage repeated: keep each line once and say it was cut."""
-    if output_tokens < config.ANSWER_NUM_PREDICT:
+def trim_runaway(text, output_tokens, looped=False):
+    """An answer that hit the output limit or was stopped in a loop is one passage repeated: keep each line once and say it was cut."""
+    if output_tokens < config.ANSWER_NUM_PREDICT and not looped:
         return text
+    if looped:
+        tail = text.rstrip()[-config.LOOP_TAIL_CHARS:]
+        text = text[:text.find(tail, text.find(tail) + 1)]      # up to where the second pass starts; also handles a loop inside one line
     seen, lines = set(), []
     for line in text.splitlines():
         if not line.strip() or line not in seen:
@@ -201,7 +204,7 @@ def generate(question, passages, top_dense, style="concise", history=(), model=N
     msgs = build_messages(question, passages, style, history)
     raw, stats = (ollama_client.chat_stream(msgs, model=model, on_token=on_token) if on_token
                   else ollama_client.chat(msgs, model=model))
-    body = strip_insufficient(trim_runaway(raw, stats.get("output_tokens", 0)))
+    body = strip_insufficient(trim_runaway(raw, stats.get("output_tokens", 0), stats.get("looped", False)))
     out.update(raw=raw, llm=stats, llm_insufficient=body is None)
     if body is None:
         out.update(abstained=True, abstain_reason="model said insufficient", answer=config.ABSTAIN_MSG)
