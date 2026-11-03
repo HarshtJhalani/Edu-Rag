@@ -14,8 +14,26 @@ def n_tokens(text):
     return max(1, round(len(text) / 4))
 
 
+ENDS_MID_PHRASE = re.compile(r"\b(of|to|the|a|an|and|or|in|on|for|with|by|from|is|are|as|at)\s*$", re.I)
+HEADING_MAX_CHARS = 45
+HEADING_MIN_WORD_COUNT = 3                       # a word seen in fewer passages is usually an OCR error
+NOT_A_HEADING = re.compile(r"(figure|fig|table|problems?|exercises?|assignments?|examples?|solutions?|summary|contents|references|chapter|unit|demo|solve|overview|credits?|acknowledge?ments?|thanks|agenda|outline|questions?|tips?|points?|more|in|on|for|with|introduction|conclusion|let|the|this|these|that|it|if|and|or|but|what|why|how|when|where|which|who)\b", re.I)
+
+
 def clean_title(text):
     return re.sub(r"\s+", " ", text).strip(" :-–•")
+
+
+def is_real_heading(title, word_counts):
+    """True for a title that names a topic. Many passages take their first line as a title, which can be a figure label
+    ('FIGURE P11.13'), table cells ('C34 | 11341'), a sentence or OCR noise. word_counts: passages per lower-case word."""
+    words = re.findall(r"[^\W\d_]+", title)
+    long_words = [w.lower() for w in words if len(w) > 2]
+    if not 3 <= len(title) <= HEADING_MAX_CHARS or not title[0].isupper() or not long_words or len(words[0]) < 2:
+        return False
+    if re.search(r"[\d|;=?.!]", title) or NOT_A_HEADING.match(title) or ENDS_MID_PHRASE.search(title):
+        return False
+    return all(word_counts.get(w, 0) >= HEADING_MIN_WORD_COUNT for w in long_words)
 
 
 def title_key(title):

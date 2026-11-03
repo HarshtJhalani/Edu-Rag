@@ -1,4 +1,4 @@
-"""🃏 Flashcards: cards written from the student's slides, reviewed with spaced repetition (Leitner boxes)."""
+"""Flashcards: cards written from the student's slides, reviewed with spaced repetition (Leitner boxes)."""
 import streamlit as st
 
 from edu_rag import config, flashcards
@@ -27,7 +27,7 @@ def study_tab(deck):
         seen.clear()
         queue = due
     if not queue:
-        st.success("Nothing due right now. 🎉 Come back later, or make new cards.", icon="✅")
+        st.success("Nothing due right now. Come back later, or make new cards.")
         return
     c = queue[0]
     st.caption(f"{len(queue)} due in this round · box: {BOX_NAMES[c['box']]} · {common.short_name(c['source'], 40)}, {c['pages']}")
@@ -44,7 +44,7 @@ def study_tab(deck):
     st.markdown(card_html("Answer", c["back"], back=True), unsafe_allow_html=True)
     st.write("")
     a, b = st.columns(2)
-    for col, knew, label in ((a, False, "❌ Didn't know"), (b, True, "✅ Knew it")):
+    for col, knew, label in ((a, False, "Didn't know"), (b, True, "Knew it")):
         if col.button(label, use_container_width=True, type="primary" if knew else "secondary", key=f"fc_{knew}"):
             flashcards.record(c["id"], knew)
             seen.add(c["id"])
@@ -56,7 +56,7 @@ def study_tab(deck):
 def make_tab(model):
     srcs = common.evidence_sources()
     if not srcs:
-        st.info("Add slides or notes on the **📚 Library** page first.")
+        st.info("Add slides or notes on the **Library** page first.")
         return
     with st.container(border=True):
         mode = st.radio("Cards from", ["Chosen decks", "A topic"], horizontal=True, key="fc_mode")
@@ -88,7 +88,7 @@ def make_tab(model):
                 keep.append(c)
             body.markdown(f"**{c['front']}**  \n{c['back']}  \n<span class='small-muted'>{common.short_name(c['source'], 40)}, "
                           f"{c['pages']}</span>", unsafe_allow_html=True)
-    if st.button(f"➕ Add {len(keep)} cards to my deck", type="primary", disabled=not keep):
+    if st.button(f"Add {len(keep)} cards to my deck", type="primary", disabled=not keep):
         added = flashcards.add(keep)
         st.session_state.pop("fc_new")
         st.toast(f"Added {added} cards" + (f" ({len(keep) - added} were already in the deck)" if added < len(keep) else ""))
@@ -115,11 +115,11 @@ def deck_tab(deck):
 
 def page():
     model = st.session_state["model"]
-    common.page_start("🃏", "Flashcards", "Cards from your own slides. Cards you know come back less often; missed ones come back today.")
+    common.page_start("Flashcards", "Cards from your own slides. Cards you know come back less often; missed ones come back today.")
     deck = flashcards.load()
     s = flashcards.stats(deck)
     common.stats_row([(s["due"], "due now"), (s["total"], "cards"), (s["new"], "never reviewed"), (s["mastered"], "well known")])
-    t1, t2, t3 = st.tabs(["📖 Study", "✨ Make cards", "🗂️ Deck"])
+    t1, t2, t3 = st.tabs(["Study", "Make cards", "Deck"])
     with t1:
         study_tab(deck)
     with t2:

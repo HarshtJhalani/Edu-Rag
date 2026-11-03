@@ -20,6 +20,16 @@ THANKS = re.compile(r"^(thanks?|thank you|thx|ok(ay)?,? thanks?)\b", re.I)
 BYE = re.compile(r"^(ok(ay)?\W*)?(bye|goodbye|see you|cya)\W*$", re.I)
 DEFINITION = re.compile(r"^(what\s+(is|are)|what's|define|meaning of)\s+(an?\s+|the\s+)?(?P<term>[^?]+?)\??$", re.I)
 REFERS_BACK = re.compile(r"\b(it|its|this|that|these|those|they|them|one|other|another)\b", re.I)
+OPENS_FOLLOWUP = re.compile(r"^\s*(and|but|so|also|then|what about|how about)\b", re.I)
+POINTS_BACK = re.compile(r"\b(this|these|those|that|the other|another (way|one|example)|(use|pick|choose|which) one)\b", re.I)
+RELATIVE_THAT = re.compile(r"\b(a|an|the)\s+(\S+\s+){1,3}that\b", re.I)        # 'a class that inherits' points at nothing earlier
+EARLY_PRONOUN = re.compile(r"^(\S+\s+){0,5}(it|its|they|them)\b", re.I)          # later on, it usually means a noun in the same sentence
+ENDS_ON_PRONOUN = re.compile(r"\b(of|for|with|about|on|in|from|by)\s+(it|them)\s*\??\s*$", re.I)      # 'an example of it'
+SHORT_REQUEST = re.compile(r"\b(example|examples|code|more|again|further|detail|details|elaborate|simple|simpler|simply|simplify|shorter|summari[sz]e|"
+                           r"continue|next|previous|above|earlier|same|first|second|third|last|former|latter)\b", re.I)
+SHORT_REQUEST_WORDS = 6
+BARE_QUESTION = re.compile(r"^\s*(why|how)(\s+not|\s+so)?\s*\?*\s*$", re.I)
+TYPES_OF = re.compile(r"\b(the\s+)?((different|various|main|major|common)\s+)?(types|kinds|sorts|categories|forms)\s+of\s+", re.I)
 COMPARE_WORDS = re.compile(r"\b(differ|difference|vs\.?|versus|compare|compared|better than|instead of)\b", re.I)
 
 ROUTER_PROMPT = """You route a student's message in a study assistant for their course materials.
@@ -49,6 +59,14 @@ def title_vocab(chunks=None):
 def in_materials(term, vocab):
     words = [w for w in index.tokenize(term) if len(w) > 2]
     return bool(words) and all(w in vocab for w in words)
+
+
+def depends_on_chat(message):
+    """Only these see the chat. With history, the LLM rewrote unrelated questions onto the last topic
+    ('How is agglomerative clustering different from divisive?' -> 'How is pop different from del?') and answers cited other pages."""
+    m = message.strip()
+    return bool(OPENS_FOLLOWUP.search(m) or BARE_QUESTION.match(m) or EARLY_PRONOUN.search(m) or ENDS_ON_PRONOUN.search(m) or POINTS_BACK.search(RELATIVE_THAT.sub(" ", m))
+                or (len(m.split()) <= SHORT_REQUEST_WORDS and SHORT_REQUEST.search(m)))
 
 
 def rule_route(message, vocab):
@@ -163,22 +181,48 @@ def interleave(lists, limit):
     return merged[:limit]
 
 
-def retrieve_for_route(r, roles=None, sources=None):
-    """definition k=4, conceptual k=8, compare = per sub-query and merged, followup = standalone rewrite."""
+def singular(word):
+    if len(word) < 4 or not word.endswith("s") or word.endswith(("ss", "us", "is")):
+        return word
+    return word[:-3] + "y" if word.endswith("ies") else word[:-2] if word.endswith(("sses", "shes", "ches", "xes")) else word[:-1]
+
+
+def list_query(message):
+    """What to search for 'What are the different types of loops in Python?': the loops. The words 'types of' found the 'Data Types'
+    and 'Function types' slides instead. Singular forms are added because the slides say 'For loop' and word search matches exact words."""
+    m = TYPES_OF.search(message)
+    if not m or not message[m.end():].strip(" ?"):
+        return None
+    words = index.tokenize(message[m.end():])
+    extra = [singular(w) for w in words if singular(w) != w]
+    return " ".join([message[m.end():].strip(" ?")] + extra)
+
+
+def passage_limit(model):
+    return config.FASTER_MAX_PASSAGES if config.CPU_MODE and model == config.LLM_SMALL else 99
+
+
+def retrieve_for_route(r, roles=None, sources=None, limit=99):
+    """definition k=4, conceptual k=8, compare = per sub-query and merged, followup = standalone rewrite; never above limit."""
     if r["type"] == "compare" or (r["type"] == "followup" and len(r["sub_queries"]) >= 2):
         lists, tops = [], []
         for sq in r["sub_queries"] or [r["standalone_query"]]:
             p, top, _ = retrieve.retrieve(sq, k=config.K_PER_SUBQUERY, roles=roles, sources=sources)
             lists.append(p)
             tops.append(top)
-        return interleave(lists, config.MAX_COMPARE_PASSAGES), max(tops, default=0.0)
-    p, top, _ = retrieve.retrieve(r["standalone_query"], k=config.K_BY_TYPE.get(r["type"], config.K), roles=roles, sources=sources)
+        return interleave(lists, min(config.MAX_COMPARE_PASSAGES, limit)), max(tops, default=0.0)
+    listed = list_query(r["standalone_query"])
+    if listed:
+        p, top, _ = retrieve.retrieve(listed, k=min(config.K_LIST, limit), roles=roles, sources=sources)
+        return p, top
+    p, top, _ = retrieve.retrieve(r["standalone_query"], k=min(config.K_BY_TYPE.get(r["type"], config.K), limit), roles=roles, sources=sources)
     return p, top
 
 
 def adaptive_answer(message, history=(), style="concise", roles=None, sources=None, model=None, on_token=None, on_route=None):
     """on_route(route) is called once the strategy is known (the app shows it); on_token streams the answer."""
     t0 = time.time()
+    history = history if depends_on_chat(message) else ()
     r = route(message, history, model=model)
     if on_route:
         on_route(r)
@@ -186,7 +230,7 @@ def adaptive_answer(message, history=(), style="concise", roles=None, sources=No
         res = generate.empty_result(message, style)
         res.update(abstained=True, abstain_reason="chitchat", answer=CHITCHAT_REPLIES[r.get("chitchat_kind", "other")])
     else:
-        passages, top = retrieve_for_route(r, roles, sources)
+        passages, top = retrieve_for_route(r, roles, sources, passage_limit(model))
         # The answer step sees the standalone question, so follow-ups are answered about the right thing.
         res = generate.generate(r["standalone_query"], passages, top, style, history, model, on_token)
         res["question"] = message

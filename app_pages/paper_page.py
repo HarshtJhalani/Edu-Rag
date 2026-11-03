@@ -1,4 +1,4 @@
-"""📄 Question paper: a new paper in the pattern of the student's previous-year papers, written from their slides,
+"""Question paper: a new paper in the pattern of the student's previous-year papers, written from their slides,
 weighted towards the topics those papers ask most. Answer key, PDF downloads, and a timed attempt in Exam mode."""
 import re
 import time
@@ -48,7 +48,8 @@ def show_paper(qp, show_sources):
     with st.container(border=True):
         st.markdown(f"<div style='text-align:center'><b>{common.esc(qp['exam'])}</b><br/>{common.esc(qp['course'] or '')}<br/>"
                     f"<span class='small-muted'>Time: {qp['duration_minutes'] // 60} h {qp['duration_minutes'] % 60:02d} min · "
-                    f"Max. marks: {qp['total_marks']}</span></div>", unsafe_allow_html=True)
+                    f"Max. marks: {qp['total_marks']} · {common.difficulty_label(qp.get('difficulty'))}</span></div>",
+                    unsafe_allow_html=True)
         for s in qp["sections"]:
             st.markdown(f"##### {s['name']} <span class='small-muted'>({common.esc(s['instruction'])})</span>", unsafe_allow_html=True)
             for q in s["questions"]:
@@ -60,7 +61,7 @@ def show_paper(qp, show_sources):
 def key_section(qp, model):
     key = st.session_state.get("qpaper_key")
     if key is None:
-        if st.button("🔑 Make answer key", use_container_width=True, disabled=common.running("paper_key")):
+        if st.button("Make answer key", use_container_width=True, disabled=common.running("paper_key")):
             sources = common.evidence_filter()
 
             def keep(result, qp=qp):                # only if that paper is still the one on screen
@@ -72,7 +73,7 @@ def key_section(qp, model):
                              keep)
             st.rerun()
         return
-    st.download_button("⬇️ Answer key PDF", paper.key_to_pdf(qp, key), file_name=f"{fname(qp)}_answer_key.pdf",
+    st.download_button("Answer key PDF", paper.key_to_pdf(qp, key), file_name=f"{fname(qp)}_answer_key.pdf",
                        mime="application/pdf", use_container_width=True)
 
 
@@ -80,7 +81,7 @@ def answers_view(qp):
     key = st.session_state.get("qpaper_key")
     if not key:
         return
-    st.markdown("#### 🔑 Answer key")
+    st.markdown("#### Answer key")
     for s in qp["sections"]:
         for q in s["questions"]:
             k = key.get(q["n"]) or {}
@@ -95,11 +96,11 @@ def fname(qp):
 
 def page():
     model = st.session_state["model"]
-    common.page_start("📄", "Question paper", "A new paper in the pattern of your previous-year papers, written from your slides "
+    common.page_start("Question paper", "A new paper in the pattern of your previous-year papers, written from your slides "
                                               "and weighted towards the topics they ask most.")
     pyqs = [s for s in common.sources() if s["role"] == "pyq" and s["source_id"] not in common.excluded()]
     if not pyqs:
-        st.info("Upload your previous-year question papers on the **📚 Library** page (choose **Previous-year question papers**).")
+        st.info("Upload your previous-year question papers on the **Library** page (choose **Previous-year question papers**).")
         return
     left, right = st.columns([1, 1])
     with left:
@@ -114,14 +115,16 @@ def page():
                              str([u["name"] for u in units]))
         frequency_card(freq)
 
-    if st.button("✨ Generate a new paper", type="primary", use_container_width=True, disabled=common.running("paper")):
+    level = common.difficulty_picker("paper_difficulty",
+                                     help="Changes how the questions are asked. The sections and marks stay as in your past paper.")
+    if st.button("Generate a new paper", type="primary", use_container_width=True, disabled=common.running("paper")):
         sources, seed = common.evidence_filter(), int(time.time())
 
         def keep(result):
             st.session_state.qpaper = result
             st.session_state.pop("qpaper_key", None)
         common.start_job("paper", "Question paper",
-                         lambda progress: paper.make(bp, freq, sources=sources, model=model, seed=seed,
+                         lambda progress: paper.make(bp, freq, sources=sources, model=model, seed=seed, difficulty=level,
                                                      progress=lambda i, n: progress(i, n, f"section {i} of {n} written")),
                          keep)
         st.rerun()
@@ -132,11 +135,11 @@ def page():
         return
     st.caption(f"Made in {qp['seconds']} s. Generate again for a different paper.")
     a, b, c = st.columns(3)
-    a.download_button("⬇️ Paper PDF", paper.to_pdf(qp), file_name=f"{fname(qp)}.pdf", mime="application/pdf",
+    a.download_button("Paper PDF", paper.to_pdf(qp), file_name=f"{fname(qp)}.pdf", mime="application/pdf",
                       use_container_width=True)
     with b:
         key_section(qp, model)
-    if c.button("⏱️ Attempt in Exam mode", use_container_width=True):
+    if c.button("Attempt in Exam mode", use_container_width=True):
         for k in [k for k in st.session_state if k.startswith("exam_a")]:
             st.session_state.pop(k)
         p = paper.to_exam(qp)

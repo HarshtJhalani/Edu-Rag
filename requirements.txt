@@ -22,7 +22,6 @@ streamlit
 # dev
 ipykernel
 nbconvert
-pytest
 # Office readers
 python-pptx
 python-docx

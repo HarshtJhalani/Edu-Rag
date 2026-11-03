@@ -1,4 +1,4 @@
-"""🎯 Quiz: practice questions from the student's slides, marked with feedback and the slide each answer is on."""
+"""Quiz: practice questions from the student's slides, marked with feedback and the slide each answer is on."""
 import streamlit as st
 
 from edu_rag import config, quiz
@@ -11,18 +11,19 @@ def setup_form(srcs, model):
         mode = st.radio("Questions from", ["Chosen decks", "A topic"], horizontal=True)
         if mode == "Chosen decks":
             chosen = st.multiselect("Decks", srcs, default=srcs[:1],
-                                    format_func=lambda s: f"{common.KIND_ICONS.get(s.get('kind') or 'pdf', '📄')} {s['name']}")
+                                    format_func=lambda s: s["name"])
             topic = None
         else:
             topic = st.text_input("Topic", placeholder="e.g. clustering methods")
             chosen = []
         n = st.slider("Number of questions", 3, 10, 5)
+        level = common.difficulty_picker("quiz_difficulty")
         ready = (mode == "Chosen decks" and chosen) or (mode == "A topic" and (topic or "").strip())
         if st.button("Start quiz", type="primary", disabled=not ready or common.running("quiz")):
             ids = [s["source_id"] for s in chosen] or common.evidence_filter()
             topic_ = topic.strip() if topic else None
             common.start_job("quiz", "Quiz",
-                             lambda progress: quiz.make(n=n, source_ids=ids, topic=topic_, model=model,
+                             lambda progress: quiz.make(n=n, source_ids=ids, topic=topic_, model=model, difficulty=level,
                                                         progress=lambda i, t: progress(i, t, f"{i} of {t} questions written")),
                              lambda qs: st.session_state.update(quiz={"questions": qs, "marks": None}))
             st.rerun()
@@ -34,6 +35,7 @@ def show_questions(qz, model):
     if not qs:
         st.warning("No questions could be made from that choice. Try another deck or a broader topic.")
         return
+    st.caption(f"Difficulty: {common.difficulty_label(qs[0].get('difficulty'))}")
     with st.form("quiz_form"):
         answers = []
         for i, q in enumerate(qs):
@@ -73,14 +75,14 @@ def show_results(qs, marks):
 
 def page():
     model = st.session_state["model"]
-    common.page_start("🎯", "Practice quiz", "Questions written from your own slides. Multiple choice is marked instantly; short answers are marked against the slide.")
+    common.page_start("Practice quiz", "Questions written from your own slides. Multiple choice is marked instantly; short answers are marked against the slide.")
     srcs = [s for s in common.sources() if s["role"] in config.EVIDENCE_ROLES and s["source_id"] not in common.excluded()]
     if not srcs:
-        st.info("Add slides or notes on the **📚 Library** page first.")
+        st.info("Add slides or notes on the **Library** page first.")
         return
     qz = st.session_state.get("quiz")
     if qz and qz["questions"]:
-        if st.button("↺ New quiz"):
+        if st.button("New quiz"):
             st.session_state.pop("quiz")
             st.rerun()
         show_questions(qz, model)

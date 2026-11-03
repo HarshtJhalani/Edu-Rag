@@ -1,4 +1,4 @@
-"""⏱️ Exam mode: a timed mock paper from past papers and the slides, marked with feedback and a cited model answer."""
+"""Exam mode: a timed mock paper from past papers and the slides, marked with feedback and a cited model answer."""
 import time
 
 import streamlit as st
@@ -9,18 +9,26 @@ from . import common
 
 
 def setup_form(model):
-    units = common.active_syllabus_units()
     pyq = common.included_ids(["pyq"])
     with st.container(border=True):
+        common.semester_picker("exam_semester")
+        units = common.active_syllabus_units()
+        all_units = common.all_syllabus_units()     # a past question is matched against all of them, or it always "fits" a semester
+        whole_syllabus = len(units) == len(all_units)
         c1, c2 = st.columns(2)
         n = c1.slider("Questions", 2, 10, 4)
         minutes = c2.slider("Time (minutes)", 5, 120, 20, step=5)
-        chosen = st.multiselect("Syllabus units", [u["name"] for u in units], placeholder="All units") if units else []
+        level = common.difficulty_picker("exam_difficulty",
+                                         help="Easy = 2-mark recall questions, Medium = 5-mark explanations, Hard = 10-mark "
+                                              "application and analysis. Past-paper questions are chosen by their marks.")
+        chosen = st.multiselect("Syllabus units", [u["name"] for u in units if u["topics"]], placeholder="All units") if units else []
+        chosen = chosen or ([] if whole_syllabus else [u["name"] for u in units if u["topics"]])   # a semester limits the paper
         use_pyq = st.toggle("Use my past-paper questions first", value=bool(pyq), disabled=not pyq,
                             help="Questions from your uploaded previous-year papers; the rest are written from your slides."
                             if pyq else "Upload previous-year papers in the Library to use them here.")
         if st.button("Start exam", type="primary", disabled=common.running("exam_build")):
             sources = common.evidence_filter()
+            course_map = common.course_file_map()
 
             def keep(paper):                        # the clock starts when the paper is ready
                 if paper["questions"]:
@@ -28,8 +36,9 @@ def setup_form(model):
                 else:
                     st.session_state.exam_warning = "No questions could be set from that choice."
             common.start_job("exam_build", "Exam paper",
-                             lambda progress: exam.build_paper(n=n, minutes=minutes, sources=sources, pyq_sources=pyq, units=units,
-                                                               chosen_units=chosen, use_past_papers=use_pyq, model=model),
+                             lambda progress: exam.build_paper(n=n, minutes=minutes, sources=sources, pyq_sources=pyq, units=all_units,
+                                                               chosen_units=chosen, use_past_papers=use_pyq, model=model,
+                                                               difficulty=level, course_map=course_map),
                              keep)
             st.rerun()
     common.job_progress("exam_build")
@@ -44,14 +53,15 @@ def timer(ex):
         ex["time_up"] = True
         st.rerun(scope="app")
     left = max(left, 0)
-    st.markdown(f"<div class='edu-timer{' low' if left < 60 else ''}'>⏱ {left // 60:02d}:{left % 60:02d}</div>",
+    st.markdown(f"<div class='edu-timer{' low' if left < 60 else ''}'>{left // 60:02d}:{left % 60:02d}</div>",
                 unsafe_allow_html=True)
 
 
 def answer_sheet(ex):
     paper = ex["paper"]
     head, clock = st.columns([3, 1])
-    head.markdown(f"**{len(paper['questions'])} questions · {paper['total_marks']} marks · {paper['minutes']} minutes**  \n"
+    head.markdown(f"**{len(paper['questions'])} questions · {paper['total_marks']} marks · {paper['minutes']} minutes · "
+                  f"{common.difficulty_label(paper.get('difficulty'))}**  \n"
                   "<span class='small-muted'>Answer in your own words. Submit when you are done; the paper is submitted "
                   "automatically when the time runs out.</span>", unsafe_allow_html=True)
     with clock:
@@ -63,8 +73,8 @@ def answer_sheet(ex):
             note = f"attempt any {q['attempt']}: the best {q['attempt']} answers count" if q.get("attempt") else "attempt all"
             st.markdown(f"#### {section} <span class='small-muted'>({note})</span>", unsafe_allow_html=True)
         with st.container(border=True):
-            tag = (f"📝 past paper: {common.short_name(q['source'], 30)}, {q['pages']}" if q["origin"] == "past paper"
-                   else "📄 generated paper" if q["origin"] == "generated paper" else "📘 from your slides")
+            tag = (f"past paper: {common.short_name(q['source'], 30)}, {q['pages']}" if q["origin"] == "past paper"
+                   else "generated paper" if q["origin"] == "generated paper" else "from your slides")
             st.markdown(f"**Q{i + 1}.** {q['question']}  \n<span class='small-muted'>[{q['marks']} marks] · {tag}</span>",
                         unsafe_allow_html=True)
             st.text_area("Answer", key=f"exam_a{i}", height=120 if q["marks"] < 10 else 200, label_visibility="collapsed",
@@ -101,7 +111,7 @@ def results(ex):
     common.stats_row([(f"{total} / {best}", "marks"), (f"{pct}%", "score"), (f"{used // 60}:{used % 60:02d}", "time used"),
                       (sum(m["score"] == m["max"] for m in marks), "full marks")])
     if ex.get("time_up"):
-        st.info("Time ran out, so the paper was submitted automatically.", icon="⏱")
+        st.info("Time ran out, so the paper was submitted automatically.")
     for i, (q, m) in enumerate(zip(qs, marks)):
         share = m["score"] / m["max"] if m["max"] else 0
         icon = "✅" if share == 1 else "🟡" if share >= 0.4 else "❌"
@@ -118,9 +128,9 @@ def results(ex):
 
 def page():
     model = st.session_state["model"]
-    common.page_start("⏱️", "Exam mode", "A timed mock paper from your past papers and slides, marked like an examiner would.")
+    common.page_start("Exam mode", "A timed mock paper from your past papers and slides, marked like an examiner would.")
     if not common.evidence_sources():
-        st.info("Add slides or notes on the **📚 Library** page first.")
+        st.info("Add slides or notes on the **Library** page first.")
         return
     ex = st.session_state.get("exam")
     if not ex:
@@ -140,7 +150,7 @@ def page():
             st.rerun()
         return
     results(ex)
-    if st.button("↺ New exam", type="primary"):
+    if st.button("New exam", type="primary"):
         for k in [k for k in st.session_state if k.startswith("exam")]:
             st.session_state.pop(k)
         st.rerun()

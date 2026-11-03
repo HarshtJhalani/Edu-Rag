@@ -12,6 +12,11 @@ def _url(path):
     return f"{config.OLLAMA_URL}{path}"
 
 
+def cpu_options():
+    """Keeps a model off the GPU when the app runs in CPU mode (Ollama falls back by itself on a machine with no GPU)."""
+    return {"num_gpu": 0} if config.CPU_ONLY else {}
+
+
 def is_running(timeout=3):
     try:
         return requests.get(_url("/api/version"), timeout=timeout).ok
@@ -45,6 +50,13 @@ def unload(model, wait=5.0):
     return False
 
 
+def unload_off_gpu():
+    """A model loaded on the processor stays there for later GPU requests until it times out, so it is reloaded."""
+    for m in requests.get(_url("/api/ps"), timeout=10).json()["models"]:
+        if not m.get("size_vram"):
+            unload(m["name"])
+
+
 def unload_all(wait=5.0):
     for m in loaded_models():
         unload(m, wait)
@@ -57,7 +69,8 @@ def embed(texts, model=None, prefix="", batch=None, keep_alive="10m"):
     out = []
     for i in range(0, len(texts), batch):
         r = requests.post(_url("/api/embed"), timeout=300,
-                          json={"model": model, "input": [prefix + t for t in texts[i:i + batch]], "keep_alive": keep_alive})
+                          json={"model": model, "input": [prefix + t for t in texts[i:i + batch]], "keep_alive": keep_alive,
+                                "options": cpu_options()})
         r.raise_for_status()
         out += r.json()["embeddings"]
     v = np.asarray(out, dtype=np.float32).reshape(len(out), -1)
@@ -66,9 +79,8 @@ def embed(texts, model=None, prefix="", batch=None, keep_alive="10m"):
 
 def chat(messages, model=None, json_mode=False, temperature=None, keep_alive="10m", num_predict=None, images=None):
     """Returns (text, stats). num_ctx is always set."""
-    options = {"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE if temperature is None else temperature}
-    if num_predict:
-        options["num_predict"] = num_predict
+    options = {"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE if temperature is None else temperature, **cpu_options()}
+    options["num_predict"] = num_predict or (config.JSON_NUM_PREDICT if json_mode else config.ANSWER_NUM_PREDICT)
     body = {"model": model or config.LLM, "messages": messages, "stream": False, "keep_alive": keep_alive, "options": options}
     if json_mode:
         body["format"] = "json"
@@ -83,7 +95,8 @@ def chat(messages, model=None, json_mode=False, temperature=None, keep_alive="10
 
 def chat_stream(messages, model=None, temperature=None, keep_alive="10m", on_token=None):
     """Like chat(), but calls on_token(piece) as text arrives. Returns (full text, stats)."""
-    options = {"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE if temperature is None else temperature}
+    options = {"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE if temperature is None else temperature,
+               "num_predict": config.ANSWER_NUM_PREDICT, **cpu_options()}
     body = {"model": model or config.LLM, "messages": messages, "stream": True, "keep_alive": keep_alive, "options": options}
     t0, parts, last = time.time(), [], {}
     with requests.post(_url("/api/chat"), json=body, stream=True, timeout=600) as r:

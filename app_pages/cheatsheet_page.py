@@ -1,4 +1,4 @@
-"""📝 Cheat sheet: revision notes for a deck or a topic, every bullet with its page; download as Markdown or PDF."""
+"""Cheat sheet: revision notes for a deck or a topic, every bullet with its page; download as Markdown or PDF."""
 import re
 
 import streamlit as st
@@ -10,15 +10,15 @@ from . import common
 
 def page():
     model = st.session_state["model"]
-    common.page_start("📝", "Cheat sheet", "Short revision notes from your own materials. Every bullet shows the page it came from.")
+    common.page_start("Cheat sheet", "Short revision notes from your own materials. Every bullet shows the page it came from.")
     srcs = [s for s in common.sources() if s["role"] in config.EVIDENCE_ROLES]
     if not srcs:
-        st.info("Add slides or notes on the **📚 Library** page first.")
+        st.info("Add slides or notes on the **Library** page first.")
         return
     with st.container(border=True):
         mode = st.radio("Make a cheat sheet for", ["A whole deck", "A topic"], horizontal=True)
         if mode == "A whole deck":
-            src = st.selectbox("Deck", srcs, format_func=lambda s: f"{common.KIND_ICONS.get(s.get('kind') or 'pdf', '📄')} {s['name']}")
+            src = st.selectbox("Deck", srcs, format_func=lambda s: s["name"])
             topic = None
         else:
             topic = st.text_input("Topic", placeholder="e.g. decision tree attribute selection measures")
@@ -44,8 +44,8 @@ def page():
     c1.subheader(sheet["title"])
     c1.caption(f"{len(sheet['sections'])} sections · {n} points · made in {sheet['seconds']} s")
     fname = re.sub(r"[^\w\- ]+", "", sheet["title"]).strip().replace(" ", "_")[:60] or "cheat_sheet"
-    c2.download_button("⬇️ Markdown", cheatsheet.to_markdown(sheet), file_name=f"{fname}.md", use_container_width=True)
-    c3.download_button("⬇️ PDF", cheatsheet.to_pdf(sheet), file_name=f"{fname}.pdf", mime="application/pdf", use_container_width=True)
+    c2.download_button("Markdown", cheatsheet.to_markdown(sheet), file_name=f"{fname}.md", use_container_width=True)
+    c3.download_button("PDF", cheatsheet.to_pdf(sheet), file_name=f"{fname}.pdf", mime="application/pdf", use_container_width=True)
     for s in sheet["sections"]:
         with st.container(border=True):
             st.markdown(f"**{s['title']}** <span class='small-muted'>· {common.short_name(s['source'], 40)} · {s['pages']}</span>",

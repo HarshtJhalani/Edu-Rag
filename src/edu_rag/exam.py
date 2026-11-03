@@ -8,18 +8,21 @@ import unicodedata
 
 from . import config, generate, ollama_client, quiz, retrieve, syllabus
 
+UNIT_TOPICS_SEARCHED = 24
+DIFFICULTY_MARKS = {"easy": 2, "medium": 5, "hard": 10}   # marks of a generated question at each level
 MARKS_PATTERNS = [r"[\(\[]\s*(\d{1,2})\s*(?:marks?|m)?\s*[\)\]]\s*$", r"\b(\d{1,2})\s*marks?\b", r"\b(\d{1,2})\s*M\s*$"]
 SECTION_LINE = re.compile(r"^\s*(section|part)\s+[a-e1-5]\b.*$", re.I | re.M)
 NUMBER_PREFIX = re.compile(r"^\s*(?:Q(?:uestion)?\.?\s*)?\d+\s*\(?[a-z]?\s*[.)]\s*|^\s*\(?[a-h]\)\s*", re.I)
 GEN_PROMPT = """You set exam questions for a university course from numbered passages of the course slides.
-Return JSON only: {{"questions": [{{"question": "...", "marks": 2 or 5 or 10, "source": "S1"}}, ...]}} with exactly {n} questions.
+Return JSON only: {{"questions": [{{"question": "...", "source": "S1"}}, ...]}} with exactly {n} questions.
+Every question is worth {marks} marks. Difficulty: {difficulty}
 Rules:
 - Write questions the way a university exam paper does: "Explain ...", "Differentiate between ...", "Write a program ...",
   "What is ...? Give an example." 2 marks = a definition, 5 = an explanation, 10 = a long answer or comparison.
-- Each question must be answerable from its passage ("source"). Vary the passages and the marks.
+- Each question must be answerable from its passage ("source"). Vary the passages.
 - Never mention the passages, "the given text", "the slides" or their labels (S1, S2, ...): the paper stands alone."""
 PASSAGE_MENTION = re.compile(r"\s*,?\s*\b(?:(?:as\s+)?(?:mentioned|given|described|discussed|shown|provided)\s+)?(?:in|from)\s+(?:the\s+)?"
-                             r"(?:given\s+)?(?:[\w`.-]+\s+){0,3}(?:passages?|text|slides?|materials?)\b|\s+(?:mentioned|provided|given)(?=\s*[?.])", re.I)
+                             r"(?:given\s+)?(?:[\w`.-]+\s+){0,3}(?:passages?|text|slides?|materials?)\b|(?<!\bis)(?<!\bare)(?<!\bbe)(?<!\bnot)\s+(?:mentioned|provided|given)(?=\s*[?.])", re.I)
 MARK_PROMPT = """You are a university examiner. Mark the student's answer to an exam question.
 Inside <reference> are numbered passages from the course slides: YOUR marking scheme, never seen by the student.
 Only the text inside <student_answer> is what the student wrote (closed book: citations or slide wording are never
@@ -55,6 +58,11 @@ def question_text(chunk):
     return re.sub(r"\s+", " ", body)
 
 
+def marks_level(marks):
+    """A past question's level, judged by its marks: nobody labelled them, and marks are what the paper's setter gave."""
+    return "easy" if marks <= 4 else "medium" if marks <= 8 else "hard"
+
+
 def past_paper_questions(sources=None, units=None, chosen_units=None):
     """Questions from the included past papers; with chosen_units, only questions that fall in those units."""
     out = []
@@ -64,7 +72,8 @@ def past_paper_questions(sources=None, units=None, chosen_units=None):
         text = question_text(c)
         if len(text) < 15:
             continue
-        q = {"question": text, "marks": parse_marks(c["text"]), "origin": "past paper", "source": c["source_name"],
+        marks = parse_marks(c["text"])
+        q = {"question": text, "marks": marks, "difficulty": marks_level(marks), "origin": "past paper", "source": c["source_name"],
              "pages": generate.page_label(c), "chunk_id": c["chunk_id"]}
         if chosen_units:
             hit = syllabus.scope(text, units)
@@ -81,20 +90,27 @@ def clean_generated(text):
     return re.sub(r"\s+([?.!,])", r"\1", t).strip()
 
 
-def unit_passages(units, chosen_units, sources, per_topic=2):
-    """Slide passages that best match the topics of the chosen units (one search per topic)."""
+def unit_passages(units, chosen_units, sources, per_topic=2, max_topics=UNIT_TOPICS_SEARCHED, seed=None, course_map=None):
+    """Slide passages that best match the topics of the chosen units, searched only in each course's own files. A sample of
+    topics is searched, because a semester has hundreds; a topic the slides only loosely match is skipped."""
+    course_map = syllabus.course_files(units) if course_map is None else course_map
+    topics = [(u.get("course"), t) for u in units if u["name"] in chosen_units for t in u["topics"]]
     picked = {}
-    for u in units:
-        if u["name"] in chosen_units:
-            for t in u["topics"]:
-                for c in retrieve.retrieve(f"{u['name']}: {t}", k=per_topic, sources=sources)[0]:
-                    picked.setdefault(c["chunk_id"], c)
+    for course, t in random.Random(seed).sample(topics, min(max_topics, len(topics))):
+        files = [s for s in course_map[course] if not sources or s in sources] if course in course_map else sources
+        if course in course_map and not files:
+            continue
+        found, top, _ = retrieve.retrieve(t, k=per_topic, sources=files)
+        if top >= config.COVERAGE_MIN_SCORE:
+            for c in found:
+                picked.setdefault(c["chunk_id"], c)
     return list(picked.values())
 
 
-def generate_questions(n, passages, model=None, seed=None):
-    """Exam-style questions from slide passages, each tied to the passage that answers it."""
+def generate_questions(n, passages, model=None, seed=None, difficulty=quiz.DEFAULT_DIFFICULTY):
+    """Exam-style questions from slide passages at one level, each tied to the passage that answers it."""
     rng = random.Random(seed)
+    marks = DIFFICULTY_MARKS.get(difficulty, config.EXAM_DEFAULT_MARKS)
     passages = rng.sample(passages, len(passages))
     out, seen = [], set()
     for i in range(0, len(passages), quiz.PASSAGES_PER_CALL):
@@ -102,7 +118,7 @@ def generate_questions(n, passages, model=None, seed=None):
             break
         group = passages[i:i + quiz.PASSAGES_PER_CALL]
         k = min(n - len(out), len(group)) + 1
-        msgs = [{"role": "system", "content": GEN_PROMPT.format(n=k)},
+        msgs = [{"role": "system", "content": GEN_PROMPT.format(n=k, marks=marks, difficulty=quiz.difficulty_rule(difficulty))},
                 {"role": "user", "content": f"Passages:\n{generate.format_passages(group)}"}]
         raw, _ = ollama_client.chat(msgs, model=model, json_mode=True, temperature=0.4)
         try:
@@ -112,29 +128,30 @@ def generate_questions(n, passages, model=None, seed=None):
         for it in items if isinstance(items, list) else []:
             m = re.fullmatch(r"\s*\[?S(\d+)\]?\s*", str(it.get("source", ""))) if isinstance(it, dict) else None
             text = clean_generated(str(it.get("question", ""))) if m else ""
-            if not m or not 1 <= int(m.group(1)) <= len(group) or len(text) < 10 or text.lower() in seen:
+            if (not m or not 1 <= int(m.group(1)) <= len(group) or len(text) < 10 or text.lower() in seen
+                    or not quiz.fits_level(text, difficulty)):
                 continue
             seen.add(text.lower())
             c = group[int(m.group(1)) - 1]
-            marks = it.get("marks") if it.get("marks") in (2, 5, 10) else config.EXAM_DEFAULT_MARKS
-            out.append({"question": text, "marks": marks, "origin": "from your slides", "source": c["source_name"],
+            out.append({"question": text, "marks": marks, "difficulty": difficulty, "origin": "from your slides", "source": c["source_name"],
                         "pages": generate.page_label(c), "chunk_id": c["chunk_id"]})
     return out[:n]
 
 
 def build_paper(n=5, minutes=30, sources=None, pyq_sources=None, units=None, chosen_units=None, use_past_papers=True,
-                model=None, seed=None):
-    """{"questions", "minutes", "total_marks"}: past-paper questions first (shuffled), then generated ones."""
+                model=None, seed=None, difficulty=quiz.DEFAULT_DIFFICULTY, course_map=None):
+    """{"questions", "minutes", "total_marks"}: past-paper questions of that level first (shuffled), then generated ones."""
     rng = random.Random(seed)
     qs = past_paper_questions(pyq_sources, units, chosen_units) if use_past_papers and pyq_sources else []
+    qs = [q for q in qs if q["difficulty"] == difficulty]
     qs = rng.sample(qs, min(n, len(qs)))
     if len(qs) < n:
         if chosen_units and units:
-            passages = unit_passages(units, chosen_units, sources)
+            passages = unit_passages(units, chosen_units, sources, seed=seed, course_map=course_map)
         else:
             passages = quiz.pick_passages(sources, None, n=(n - len(qs)) * 2, seed=seed)
-        qs += generate_questions(n - len(qs), passages, model=model, seed=seed)
-    return {"questions": qs, "minutes": minutes, "total_marks": sum(q["marks"] for q in qs)}
+        qs += generate_questions(n - len(qs), passages, model=model, seed=seed, difficulty=difficulty)
+    return {"questions": qs, "minutes": minutes, "total_marks": sum(q["marks"] for q in qs), "difficulty": difficulty}
 
 
 def mark(question, answer, sources=None, model=None):

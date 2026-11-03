@@ -8,7 +8,7 @@ import time
 import unicodedata
 from collections import Counter
 
-from . import chunking, config, exam, export, generate, library, ollama_client, retrieve
+from . import chunking, config, exam, export, generate, library, ollama_client, quiz, retrieve
 
 BLUEPRINT_FILE = "blueprint.json"
 MIN_CHUNK_TOKENS = 40
@@ -17,6 +17,10 @@ REFILL_PASSES = 5
 OVERVIEW_TITLES = {"contents", "table of contents", "agenda", "outline", "summary", "overview", "index", "references"}
 MARKS_SUFFIX = re.compile(r"\s*[\(\[]\s*\d+\s*marks?\s*[\)\]]\s*$", re.I)   # the paper prints marks itself
 COURSE_DECK_MIN = 2                              # past questions a deck must match to count as part of the course
+LEVEL_STYLES = {                                 # the level overrides the past paper's style for a slot; marks stay
+    "easy": {"compare": "explain", "program": "explain", "output": "short answer", "long answer": "explain"},
+    "hard": {"definition": "apply to a small case", "short answer": "apply to a small case", "explain": "analyse and justify"},
+}
 PATTERN_PROMPT = """You read a university question paper and describe its PATTERN, not its content.
 Return JSON only:
 {"course": "...", "exam": "e.g. End Semester Examination", "duration_minutes": 180, "total_marks": 60,
@@ -31,6 +35,7 @@ WRITE_PROMPT = """You set a NEW university exam paper from numbered passages of 
 Return JSON only: {{"questions": [{{"n": 1, "question": "..."}}, ...]}} with exactly {k} questions.
 Question i must be answerable from passage [S i] and fit its slot:
 {slots}
+- Difficulty of the whole paper: {difficulty} The slot's marks still decide how long the answer is.
 - Write like a real exam paper ("Explain ...", "Differentiate between ...", "Write a program to ...", "What is ...?").
   A 2-mark question asks for one fact; a long-answer question asks for explanation plus an example or program.
 - Match the style of these questions from the student's previous papers, but never copy them:
@@ -186,13 +191,15 @@ def too_close(q, past, limit=0.7):
     return False
 
 
-def write_section(section, slides, past, model=None, rng=None, taken=()):
+def write_section(section, slides, past, model=None, rng=None, taken=(), difficulty=quiz.DEFAULT_DIFFICULTY):
     """One LLM call per section: question i from slide i, with its marks and style."""
     rng = rng or random.Random()
-    slots = "\n".join(f"{i}. [S{i}] {q['marks']} marks, style: {q['style']}" for i, q in enumerate(section["questions"], 1))
+    level_styles = LEVEL_STYLES.get(difficulty, {})
+    slots = "\n".join(f"{i}. [S{i}] {q['marks']} marks, style: {level_styles.get(q['style'], q['style'])}"
+                      for i, q in enumerate(section["questions"], 1))
     same = [p["question"] for p in past if p["marks"] in {q["marks"] for q in section["questions"]}] or [p["question"] for p in past]
     examples = "\n".join(f"  - {e}" for e in rng.sample(same, min(4, len(same))))
-    msgs = [{"role": "system", "content": WRITE_PROMPT.format(k=len(slides), slots=slots, examples=examples)},
+    msgs = [{"role": "system", "content": WRITE_PROMPT.format(k=len(slides), slots=slots, examples=examples, difficulty=quiz.difficulty_rule(difficulty))},
             {"role": "user", "content": f"Passages:\n{generate.format_passages(slides)}"}]
     raw, _ = ollama_client.chat(msgs, model=model, json_mode=True, temperature=0.5)
     try:
@@ -207,13 +214,14 @@ def write_section(section, slides, past, model=None, rng=None, taken=()):
     out = []
     for i, slot in enumerate(section["questions"][:len(slides)], 1):
         text = texts.get(i, "")
-        if len(text) < 10 or too_close(text, [p["question"] for p in past]) or too_close(text, taken, 0.5):
+        if (len(text) < 10 or too_close(text, [p["question"] for p in past]) or too_close(text, taken, 0.5)
+                or not quiz.fits_level(text, difficulty)):
             continue
         c, share = best_slide(text, slides)        # the model sometimes writes question i from another passage
         if share < MIN_SLIDE_SUPPORT:
             continue                                # from no passage at all: dropped, refilled with other slides
         taken.append(text)
-        out.append({"question": text, "marks": slot["marks"], "style": slot["style"], "chunk_id": c["chunk_id"],
+        out.append({"question": text, "marks": slot["marks"], "style": slot["style"], "difficulty": difficulty, "chunk_id": c["chunk_id"],
                     "source": c["source_name"], "pages": generate.page_label(c), "topic": chunking.clean_title(c["title"])})
     return out
 
@@ -228,8 +236,8 @@ def best_slide(question, slides):
     return c, share
 
 
-def make(blueprint, freq, sources=None, model=None, seed=None, progress=None):
-    """A new paper in the blueprint's pattern. Slots the model fills badly are retried once with other slides."""
+def make(blueprint, freq, sources=None, model=None, seed=None, progress=None, difficulty=quiz.DEFAULT_DIFFICULTY):
+    """A new paper in the blueprint's pattern at one level. Slots the model fills badly are retried with other slides."""
     rng = random.Random(seed)
     t0 = time.time()
     weights = candidate_slides(freq, sources)
@@ -245,7 +253,7 @@ def make(blueprint, freq, sources=None, model=None, seed=None, progress=None):
                                  avoid_titles={q["topic"].lower() for q in qs})
             used |= {c["chunk_id"] for c in slides}
             taken = [q["question"] for sec in sections for q in sec["questions"]] + [q["question"] for q in qs]
-            qs += write_section(need, slides, past, model=model, rng=rng, taken=taken)
+            qs += write_section(need, slides, past, model=model, rng=rng, taken=taken, difficulty=difficulty)
         sections.append(dict(s, questions=qs))
         if progress:
             progress(si + 1, len(blueprint["sections"]))
@@ -257,7 +265,7 @@ def make(blueprint, freq, sources=None, model=None, seed=None, progress=None):
     return {"course": blueprint.get("course", ""), "exam": blueprint.get("exam", "Examination"),
             "duration_minutes": blueprint.get("duration_minutes", 180), "instructions": blueprint.get("instructions", []),
             "sections": sections, "total_marks": total_marks(sections), "pattern_from": blueprint.get("source", ""),
-            "seconds": round(time.time() - t0, 1)}
+            "difficulty": difficulty, "seconds": round(time.time() - t0, 1)}
 
 
 # --- 4. answer key, PDFs, exam mode ---------------------------------------------------------------------
@@ -298,7 +306,8 @@ def header_html(paper, title_suffix=""):
     return (f"<h1 style='text-align:center'>{export.esc(paper['exam'])}{title_suffix}</h1>"
             f"<h2 style='text-align:center'>{course}</h2>"
             f"<p><b>Time: {paper['duration_minutes'] // 60} h {paper['duration_minutes'] % 60:02d} min</b> &nbsp;&nbsp; "
-            f"<b>Max. Marks: {paper['total_marks']}</b></p>"
+            f"<b>Max. Marks: {paper['total_marks']}</b> &nbsp;&nbsp; "
+            f"<b>Difficulty: {export.esc(paper.get('difficulty', quiz.DEFAULT_DIFFICULTY).capitalize())}</b></p>"
             + ("<p><i>" + " ".join(f"({i}) {export.esc(t)}" for i, t in enumerate(paper["instructions"], 1)) + "</i></p>"
                if paper["instructions"] else "")
             + "<p class='muted'>Generated by Edu-RAG from your slides, in the pattern of your previous-year papers.</p>")
@@ -331,4 +340,5 @@ def to_exam(paper):
     for si, s in enumerate(paper["sections"]):
         for q in s["questions"]:
             qs.append(dict(q, origin="generated paper", section=si, section_name=s["name"], attempt=s["attempt"]))
-    return {"questions": qs, "minutes": paper["duration_minutes"], "total_marks": paper["total_marks"]}
+    return {"questions": qs, "minutes": paper["duration_minutes"], "total_marks": paper["total_marks"],
+            "difficulty": paper.get("difficulty", quiz.DEFAULT_DIFFICULTY)}

@@ -18,7 +18,10 @@ STYLES = {
     "concise": "Answer in 2 to 4 sentences.",
     "simple": "Explain for a beginner: short sentences, no jargon, and define any technical term you use.",
     "step-by-step": "Answer as a numbered list of steps.",
-    "worked example": "Explain briefly, then walk through one worked example that uses code or numbers from the passages.",
+    "worked example": ("First explain in one or two sentences. Then write the heading **Worked example** and walk through one example step by step, "
+                       "even when the question only needs a yes or no. "
+                       "Use code or numbers from the passages. If the passages have none, apply what they say to small numbers of your own "
+                       "and say that those numbers are made up."),
 }
 
 
@@ -28,11 +31,16 @@ def format_passages(passages, prefix="S"):
     return "\n\n".join(f"[{prefix}{i}] ({c['source_name']}, {c['title']})\n{c['text']}" for i, c in enumerate(passages, start=1))
 
 
+def cite_reminder(prefix="S"):
+    """Right after the question: 3B left out citations on 14 of 49 answers when the rule was only at the top of the prompt."""
+    return f"Remember: end each sentence with its citation, like [{prefix}1]."
+
+
 def build_messages(question, passages, style="concise", history=(), system=SYSTEM_PROMPT, prefix="S"):
     msgs = [{"role": "system", "content": system}]
     msgs += [{"role": m["role"], "content": m["content"]} for m in list(history)[-config.MAX_HISTORY_MESSAGES:]]
     msgs.append({"role": "user", "content": f"Passages:\n{format_passages(passages, prefix)}\n\n"
-                                            f"Style: {STYLES.get(style, style)}\n\nQuestion: {question}"})
+                                            f"Style: {STYLES.get(style, style)}\n\nQuestion: {question}\n\n{cite_reminder(prefix)}"})
     return msgs
 
 
@@ -69,7 +77,41 @@ def parse_citations(text, n_passages, prefix="S"):
         invalid.extend(x for x in nums if not 1 <= x <= n_passages)
         valid.extend(good)
         return "".join(f"[{prefix}{x}]" for x in good)
-    return cite_pattern(prefix).sub(fix, text), sorted(set(valid)), invalid
+    text = re.sub(r"\s*\[\s*\]", "", cite_pattern(prefix).sub(fix, text))       # the model sometimes writes an empty []
+    text = re.sub(rf"(\[{prefix}\d+\])(\s*[.!?]?\s*\1)+", lambda m: m.group(1) + ("." if "." in m.group(0) else ""), text)     # '[S1]. [S1]'
+    return text, sorted(set(valid)), invalid
+
+
+def tidy_answer(text, question, prefix="S"):
+    """Things 3B writes: the question copied as its own first line, and 'according to passage S1,' or '[Passage S2]'. Done here because
+    asking for it in the prompt ('start with the direct answer') made both models refuse fewer uncovered questions: 3B 5 -> 2, 7B 7 -> 4 of 16."""
+    words = re.findall(r"\w+", question)
+    echo = r"\W*".join(map(re.escape, words))
+    if words:
+        text = re.sub(rf"^\s*{echo}[^\w\n]*(?:{prefix}\d+[^\w\n]*)*(?:\n|$)", "", text, count=1, flags=re.I)
+    text = re.sub(rf"\[\s*passage\s+({prefix}\d+)\s*\]", r"[\1]", text, flags=re.I)
+    text = re.sub(r"[ \t]*\[\s*passage[^\]]*\]", "", text, flags=re.I)
+    text = re.sub(rf"\bpassages?\s*:\s*(?=\[{prefix}\d+\])", "", text, flags=re.I)
+    mention = rf"\b(?:according to|as stated in|as mentioned in|based on|from|in)\s+(?:the\s+)?passages?\s*(?:\[?{prefix}\d+\]?)?\s*,?\s*(?:it\s+states\s+that\s+)?"
+    text = re.sub(r"[ \t]*" + mention + r"(?=[.;])", "", text, flags=re.I)         # no gap left before the full stop
+    text = re.sub(mention, "", text, flags=re.I).strip()
+    return text[:1].upper() + text[1:] if text else text
+
+
+def only_citations(text, prefix="S"):
+    return not re.sub(rf"\[{prefix}\d+\]|\W", "", text)
+
+
+def trim_runaway(text, output_tokens):
+    """An answer that hit the output limit is usually one passage repeated: keep each line once and say it was cut."""
+    if output_tokens < config.ANSWER_NUM_PREDICT:
+        return text
+    seen, lines = set(), []
+    for line in text.splitlines():
+        if not line.strip() or line not in seen:
+            lines.append(line)
+            seen.add(line)
+    return "\n".join(lines).strip() + "\n\n" + config.ANSWER_CUT_NOTE
 
 
 def page_label(c):
@@ -159,12 +201,15 @@ def generate(question, passages, top_dense, style="concise", history=(), model=N
     msgs = build_messages(question, passages, style, history)
     raw, stats = (ollama_client.chat_stream(msgs, model=model, on_token=on_token) if on_token
                   else ollama_client.chat(msgs, model=model))
-    body = strip_insufficient(raw)
+    body = strip_insufficient(trim_runaway(raw, stats.get("output_tokens", 0)))
     out.update(raw=raw, llm=stats, llm_insufficient=body is None)
     if body is None:
         out.update(abstained=True, abstain_reason="model said insufficient", answer=config.ABSTAIN_MSG)
         return out
-    text, valid, invalid = parse_citations(title_citations_to_labels(body, passages), len(passages))
+    text, valid, invalid = parse_citations(title_citations_to_labels(tidy_answer(body, question), passages), len(passages))
+    if only_citations(text):                        # 3B once answered a question with just '[S1]'
+        out.update(abstained=True, abstain_reason="model wrote no answer", answer=config.ABSTAIN_MSG)
+        return out
     out.update(answer=text, invalid_citations=invalid, support=support_check(text, passages))
     if valid:
         out.update(citations_ok=True, sources=[source_entry(passages[n - 1], n) for n in valid])

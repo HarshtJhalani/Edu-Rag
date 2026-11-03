@@ -6,7 +6,6 @@ env/
 *.egg-info/
 __pycache__/
 *.py[cod]
-.pytest_cache/
 .ipynb_checkpoints/
 
 # --- Course material: copyrighted (university slides, papers) and large ----------
@@ -46,10 +45,7 @@ desktop.ini
 *.tmp
 *.bak
 
-# Kept on purpose: data/eval/ (eval questions + results = evidence for the report),
-# notebooks/, src/, app_pages/, tests/, scripts/, .streamlit/, start.bat.
-# data/eval/mixed_test.pdf is excluded by the *.pdf rule above (made from a lecture deck);
-# data/eval/sample_papers/ (sample PDFs for the paper generator) and run logs (*.log) likewise.
+# Testing and evaluation material lives in the project report's folder, not here.
 
 # --- Research notes and the project report (kept outside the code) -----------------
 research_notes/

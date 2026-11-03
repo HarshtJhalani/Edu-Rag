@@ -9,16 +9,18 @@ _STATE = {}                                       # chunks, bm25, collection, re
 
 
 def load_state(force=False):
-    """Load chunks, BM25 and the collection once; call reset() after index.sync()."""
-    if force or "chunks" not in _STATE:
+    """Load chunks, BM25 and the collection; again whenever index.sync() has finished since the last load, so an upload
+    whose page was left half way (Streamlit stops that script) still reaches the search."""
+    stamp = index.index_stamp()
+    if force or "chunks" not in _STATE or _STATE.get("stamp") != stamp:
         chunks = chunking.load_chunks()
         _STATE.update(chunks=chunks, by_id={c["chunk_id"]: c for c in chunks}, bm25=index.load_bm25(),
-                      col=index.get_collection(), terms=chunk_terms(chunks))
+                      col=index.get_collection(), terms=chunk_terms(chunks), stamp=stamp)
     return _STATE
 
 
 def reset():
-    for k in ("chunks", "by_id", "bm25", "col", "terms"):
+    for k in ("chunks", "by_id", "bm25", "col", "terms", "stamp"):
         _STATE.pop(k, None)
 
 
@@ -70,13 +72,13 @@ def dense_search(q, n=None, roles=None, sources=None, qvec=None):
     return [(i, 1 - d) for i, d in zip(r["ids"][0], r["distances"][0])]
 
 
-def dense_search_many(queries, n=None, roles=None, sources=None):
-    """dense_search for many queries with one embedding call and one Chroma query (syllabus coverage)."""
+def dense_search_many(queries, n=None, roles=None, sources=None, qvecs=None):
+    """dense_search for many queries with one embedding call and one Chroma query (syllabus coverage, which has them stored)."""
     st = load_state()
     if not queries or st["col"].count() == 0:
         return [[] for _ in queries]
     model = config.EMBED_MODEL
-    qvecs = ollama_client.embed(list(queries), model, config.EMBEDDERS.get(model, {}).get("query_prefix", ""))
+    qvecs = ollama_client.embed(list(queries), model, config.EMBEDDERS.get(model, {}).get("query_prefix", "")) if qvecs is None else qvecs
     r = st["col"].query(query_embeddings=qvecs.tolist(), n_results=n or config.CANDIDATES,
                         where=where_filter(roles or config.EVIDENCE_ROLES, sources), include=["distances"])
     return [[(i, 1 - d) for i, d in zip(ids, dists)] for ids, dists in zip(r["ids"], r["distances"])]

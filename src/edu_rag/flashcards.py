@@ -51,12 +51,8 @@ def from_passages(passages, n=12, model=None, progress=None):
         msgs = [{"role": "system", "content": PROMPT.format(n=per_call + 1)},
                 {"role": "user", "content": f"Passages:\n{generate.format_passages(group)}"}]
         raw, _ = ollama_client.chat(msgs, model=model, json_mode=True, temperature=0.3)
-        try:
-            items = json.loads(raw).get("cards", [])
-        except (ValueError, AttributeError):
-            items = []
-        for item in items if isinstance(items, list) else []:
-            c = validate(item, len(group)) if isinstance(item, dict) else None
+        for item in quiz.json_items(raw, "cards", "front"):
+            c = validate(item, len(group))
             key = c and re.sub(r"\W+", " ", c["front"].lower()).strip()
             if c and key not in seen:
                 seen.add(key)

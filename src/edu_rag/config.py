@@ -1,6 +1,7 @@
 """All settings in one place. Plain module constants; values chosen in notebooks 02-07."""
 import hashlib
 import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,7 +15,6 @@ CACHE_DIR = INDEX_DIR / "embed_cache"
 CHROMA_DIR = INDEX_DIR / "chroma"
 BM25_FILE = INDEX_DIR / "bm25.pkl"
 WEB_CACHE_DIR = DATA_DIR / "cache" / "web"
-EVAL_DIR = DATA_DIR / "eval"
 APP_SETTINGS_FILE = DATA_DIR / "app_settings.json"
 STUDY_DIR = DATA_DIR / "study"                    # the student's own progress: flashcard boxes
 FLASHCARDS_FILE = STUDY_DIR / "flashcards.json"
@@ -28,11 +28,17 @@ EVIDENCE_ROLES = ["textbook", "note", "web"]      # only these may support an an
 # 127.0.0.1, not localhost: on Windows "localhost" tries IPv6 first and Ollama listens on IPv4 only, which added
 # ~2 s to EVERY request (Ollama reported 0.28 s for an embedding the client waited 2.4 s for).
 OLLAMA_URL = "http://127.0.0.1:11434"
+CPU_FORCED = os.environ.get("EDU_RAG_CPU") == "1"  # this variable keeps the whole run on the processor
+CPU_MODE = CPU_FORCED                              # running on the processor, by choice or for lack of a GPU; set by setup_check
+CPU_ONLY = CPU_FORCED                              # keep models off the GPU; the sidebar toggle changes it through setup_check.use_cpu
 LLM = "qwen2.5:7b-instruct"
 LLM_SMALL = "qwen2.5:3b-instruct"                 # picked by setup_check when VRAM is under 7 GB
 EMBED_MODEL = "bge-m3"                            # best on the 68-question eval (04)
 VISION_MODEL = "qwen3-vl:4b-instruct-q4_K_M"
 RERANKER = "BAAI/bge-reranker-base"               # CPU; evaluation only (04/05), not used by the app
+ANSWER_NUM_PREDICT = 1500                         # 3B once wrote 53,348 words for one answer; the longest real answers (12 marks) are about 300 words
+ANSWER_CUT_NOTE = "(This answer was cut off because it was running too long. Try asking again.)"
+JSON_NUM_PREDICT = 2048                           # 3B in JSON mode can write without end; a request would wait out its 10-minute timeout
 NUM_CTX = 8192                                    # always set: Ollama silently truncates otherwise
 TEMPERATURE = 0.2
 
@@ -80,6 +86,8 @@ ABSTAIN_MSG = "Your materials don't cover this."
 # --- Router (06) ----------------------------------------------------------
 K_BY_TYPE = {"definition": 4, "conceptual": 8, "followup": 5}
 K_PER_SUBQUERY = 4
+K_LIST = 8                                        # "types of X": the kinds of X are usually on separate slides
+FASTER_MAX_PASSAGES = 5                           # 3B in CPU mode: reading the passages is most of the wait (21 s -> 15 s per answer)
 MAX_COMPARE_PASSAGES = 8
 # Keyboard mashes ("qwertyuiasdfghjkl") never reach the router LLM, which once rewrote one, using the chat history,
 # into a question about the previous answer. A message is unclear when none of its words occur in the materials AND its
@@ -100,7 +108,7 @@ WEB_K = 5
 WEB_MAX_TOKENS = 400
 
 # --- Syllabus ---------------------------------------------------------------
-SYLLABUS_MIN_SCORE = 0.52                         # question -> topic cosine; test syllabus: outside max 0.485, inside (by meaning) min 0.566
+SYLLABUS_MIN_SCORE = 0.53                         # question -> topic cosine; test syllabus: outside max 0.485, inside (by meaning) min 0.566
 COVERAGE_MIN_SCORE = 0.56                         # topic -> slide cosine; test syllabus: real coverage >= 0.575, untaught topics 0.515 / 0.552
 
 # --- Past papers (item 7) -------------------------------------------------
@@ -128,5 +136,5 @@ def chunk_settings_hash(settings=None):
 
 
 def ensure_dirs():
-    for d in (LIBRARY_DIR, INDEX_DIR, CACHE_DIR, CHROMA_DIR, WEB_CACHE_DIR, EVAL_DIR, STUDY_DIR):
+    for d in (LIBRARY_DIR, INDEX_DIR, CACHE_DIR, CHROMA_DIR, WEB_CACHE_DIR, STUDY_DIR):
         d.mkdir(parents=True, exist_ok=True)

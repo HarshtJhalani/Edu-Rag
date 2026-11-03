@@ -1,7 +1,0 @@
-{
-  "rule": "abstain if the LLM replies INSUFFICIENT_CONTEXT; skip the LLM if top dense cosine < dense_floor",
-  "dense_floor": 0.45,
-  "embed_model": "bge-m3",
-  "insufficient_token": "INSUFFICIENT_CONTEXT",
-  "lowest_answerable_dense": 0.5237207412719727
-}

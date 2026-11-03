@@ -1,10 +1,10 @@
-"""💬 Ask: the chat. Streams the answer, then shows the checked version with citation chips and extras."""
+"""Ask: the chat. Streams the answer, then shows the checked version with citation chips and extras."""
 import random
 import re
 
 import streamlit as st
 
-from edu_rag import activity, config, export, flashcards, generate, ollama_client, retrieve, router, syllabus, web
+from edu_rag import activity, chunking, config, export, flashcards, generate, ollama_client, retrieve, router, syllabus, web
 
 from . import common
 
@@ -13,11 +13,15 @@ ROUTE_LABELS = {"definition": "Definition", "conceptual": "Explanation", "compar
 
 
 def example_questions(n=4):
-    """Starter questions from slide titles, so an empty chat shows what can be asked."""
-    titles = sorted({c["title"] for c in retrieve.load_state()["chunks"]
-                     if c["role"] == "textbook" and 3 <= len(c["title"]) <= 40 and not c["title"].lower().startswith(("let", "summary", "contents", "references", "assignment", "exercise", "demo", "solve", "example"))})
+    """Starter questions from real headings, each from a different file so that one big textbook does not fill the list."""
+    state = retrieve.load_state()
+    by_file = {}
+    for c in state["chunks"]:
+        if c["role"] == "textbook" and chunking.is_real_heading(c["title"], state["terms"]["df"]):
+            by_file.setdefault(c["source_id"], set()).add(c["title"])
     rng = random.Random(st.session_state.setdefault("example_seed", random.randint(0, 10_000)))
-    return [f"Explain {t.rstrip('?')}" for t in rng.sample(titles, min(n, len(titles)))]
+    files = rng.sample(sorted(by_file), min(n, len(by_file)))
+    return [f"Explain {rng.choice(sorted(by_file[f]))}" for f in files]
 
 
 def badges(res):
@@ -26,9 +30,7 @@ def badges(res):
     if r.get("type") and r["type"] != "chitchat":
         parts.append(f":violet-badge[{ROUTE_LABELS.get(r['type'], r['type'])} · {len(res.get('retrieved', []))} passages]")
     scope = res.get("scope")
-    if scope == "outside":
-        parts.append(":orange-badge[Outside your syllabus]")
-    elif scope:
+    if isinstance(scope, dict):                     # chats from before this change may still hold "outside"
         parts.append(f":green-badge[{scope['unit'].split(':')[0]} · {scope['topic'][:50]}]")
     if res.get("seconds"):
         parts.append(f":gray-badge[{res['seconds']} s]")
@@ -40,23 +42,23 @@ def deeper_card(msg, i, style, model):
     d = msg.get("deeper")
     if not d:
         if msg["result"].get("route", {}).get("type") != "chitchat":
-            if st.button("🌐 Go deeper on the web", key=f"deep_{i}", help=web.NOTICE):
+            if st.button("Go deeper on the web", key=f"deep_{i}", help=web.NOTICE):
                 with st.spinner("Searching the web and reading pages..."):
                     msg["deeper"] = web.go_deeper(msg["result"]["route"]["standalone_query"], style, model=model)
                 st.rerun()
             st.caption("Opt-in: " + web.NOTICE)
         return
     with st.container(border=True):
-        st.markdown("**🌐 Beyond your materials**")
+        st.markdown("**Beyond your materials**")
         if d["label"]:
-            st.warning(d["label"], icon="🤖")
+            st.warning(d["label"])
         if d["badge"]:
             st.success(f"Confirmed by 2 sources · {sum(c['confirmed'] for c in d['confirmed'])} of {len(d['confirmed'])} sentences", icon="✅")
         st.markdown(d["answer"])
         for s in web.group_sources(d["sources"]):
             st.markdown(f"[{', '.join(s['labels'])}] [{s['title']}]({s['url']})" + ("" if s["allowlisted"] else " · *not on the trusted list*"))
         if d["mode"] == "web" and d["pages"] and not d.get("added"):
-            if st.button("➕ Add these pages to my sources", key=f"add_{i}"):
+            if st.button("Add these pages to my sources", key=f"add_{i}"):
                 with st.spinner("Adding the pages..."):
                     d["added"] = web.add_to_sources(d)["added"]
                 common.refresh_indexes()
@@ -67,7 +69,7 @@ def deeper_card(msg, i, style, model):
 
 def past_papers_card(hits):
     if hits:
-        with st.expander(f"📝 Asked in past papers ({len(hits)})"):
+        with st.expander(f"Asked in past papers ({len(hits)})"):
             for h in hits:
                 st.markdown(f"**{h['source']}**, p. {h['page']} · match {h['score']:.2f}")
                 st.markdown(f"> {h['text'][:500]}")
@@ -111,7 +113,7 @@ def answer_live(question, history, style, model):
 
     def on_route(r):
         if r["type"] != "chitchat":
-            status.caption(f"🔀 {ROUTE_LABELS.get(r['type'], r['type'])} → searching your materials" +
+            status.caption(f"{ROUTE_LABELS.get(r['type'], r['type'])} → searching your materials" +
                            (f" for: {', '.join(r['sub_queries'])}" if r["sub_queries"] else ""))
 
     def on_token(piece):
@@ -125,15 +127,16 @@ def answer_live(question, history, style, model):
     res = router.adaptive_answer(question, history, style, sources=common.evidence_filter(), model=model,
                                  on_token=on_token, on_route=on_route)
     status.empty()
-    box.empty()
+    box.markdown(res["answer"] or "")              # stays on screen while the steps below run; replaced right after
     units = common.active_syllabus_units()
     if units and res["route"]["type"] != "chitchat":
-        res["scope"] = syllabus.scope(res["route"]["standalone_query"], units) or "outside"
+        res["scope"] = syllabus.scope(res["route"]["standalone_query"], units)
     if res.get("citations_ok") and not res.get("abstained"):
         by_id = retrieve.load_state()["by_id"]
         activity.log_question(question, [by_id[s["chunk_id"]]["source_id"] for s in res["sources"] if s.get("chunk_id") in by_id])
     pyq = common.included_ids(["pyq"])
     hits = retrieve.past_papers(res["route"]["standalone_query"], sources=pyq) if pyq and res["route"]["type"] != "chitchat" else []
+    box.empty()
     return res, hits
 
 
@@ -163,7 +166,7 @@ def open_chat(cid=None):
 def history_sidebar():
     """New chat + this session's earlier chats (kept until the app is closed: lasting memory is future work)."""
     with st.session_state.get("sidebar_top") or st.sidebar:
-        if st.button("✏️ New chat", use_container_width=True, disabled=not st.session_state.get("messages")):
+        if st.button("New chat", use_container_width=True, disabled=not st.session_state.get("messages")):
             open_chat(None)
             st.rerun()
         store_current()
@@ -179,7 +182,7 @@ def history_sidebar():
 
 
 def export_menu(msgs):
-    with st.popover("⬇️ Export", use_container_width=True):
+    with st.popover("Export", use_container_width=True):
         name = re.sub(r"[^\w\- ]+", "", export.chat_title(msgs, 40)).strip().replace(" ", "_") or "chat"
         st.download_button("Markdown (.md)", export.chat_to_markdown(msgs), file_name=f"{name}.md", use_container_width=True)
         st.download_button("PDF", export.chat_to_pdf(msgs), file_name=f"{name}.pdf", mime="application/pdf",
@@ -194,13 +197,13 @@ def welcome(n_src):
     common.stats_row([(n_src, "sources in use"), (len(chunks), "passages indexed"),
                       (len({c["source_id"] for c in chunks if c["role"] == "pyq"}), "past papers"), (due, "flashcards due")])
     if n_src == 0:
-        st.info("Add your lecture slides or notes on the **📚 Library** page to get started.")
+        st.info("Add your lecture slides or notes on the **Library** page to get started.")
         return None
     st.markdown("**Try one of these**")
     cols = st.columns(2)
     question = None
     for j, q in enumerate(example_questions()):
-        if cols[j % 2].button(f"💡 {q}", key=f"ex_{j}", use_container_width=True):
+        if cols[j % 2].button(q, key=f"ex_{j}", use_container_width=True):
             question = q
     return question
 
@@ -212,13 +215,13 @@ def page():
     history_sidebar()
     if not msgs:                                    # empty chat: centre the welcome block in the page
         st.markdown("<div class='edu-spacer'></div>", unsafe_allow_html=True)
-    common.page_start("💬", "Ask your materials",
+    common.page_start("Ask your materials",
                       f"Answers come only from your {n_src} sources, with the page each fact came from · style: {style}")
     if msgs:
         _, c1, c2 = st.columns([3, 1.2, 1.1])
         with c1:
             export_menu(msgs)
-        if c2.button("🗑️ Clear", use_container_width=True, help="Delete this chat"):
+        if c2.button("Clear", use_container_width=True, help="Delete this chat"):
             st.session_state.chats = [c for c in st.session_state.get("chats", []) if c["id"] != st.session_state.get("chat_id")]
             st.session_state.messages = []
             st.session_state.pop("chat_id", None)
@@ -227,7 +230,7 @@ def page():
     question = welcome(n_src) if not msgs else None
 
     for i, msg in enumerate(msgs):
-        with st.chat_message(msg["role"], avatar="🧑‍🎓" if msg["role"] == "user" else "📘"):
+        with st.chat_message(msg["role"]):
             if msg["role"] == "user":
                 st.markdown(msg["content"])
             else:
@@ -237,9 +240,9 @@ def page():
     if question:
         history = [{"role": m["role"], "content": m["content"]} for m in msgs]
         msgs.append({"role": "user", "content": question})
-        with st.chat_message("user", avatar="🧑‍🎓"):
+        with st.chat_message("user"):
             st.markdown(question)
-        with st.chat_message("assistant", avatar="📘"):
+        with st.chat_message("assistant"):
             res, hits = answer_live(question, history, style, model)
             msg = {"role": "assistant", "content": res["answer"] or "", "result": res, "past_papers": hits}
             msgs.append(msg)

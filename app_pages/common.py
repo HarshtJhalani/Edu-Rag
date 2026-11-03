@@ -7,10 +7,10 @@ from pathlib import Path
 
 import streamlit as st
 
-from edu_rag import config, generate, library, previews, retrieve, syllabus
+from edu_rag import config, generate, library, previews, quiz, retrieve, syllabus
 
+ALL_SEMESTERS = "All semesters"
 ROLE_LABELS = {"textbook": "Slides & textbooks", "note": "Notes", "web": "From the web", "pyq": "Past papers", "syllabus": "Syllabus"}
-KIND_ICONS = {"pdf": "📄", "pptx": "📊", "docx": "📝", "ipynb": "📓", "web": "🌐", "note": "🗒️"}
 # Colours are translucent indigo/greys so the same rules read well in the light and the dark theme.
 CSS = """
 <style>
@@ -104,7 +104,6 @@ def job_progress(name):
     if j["status"] != "running":
         st.rerun(scope="app")
     st.progress(min(j["i"] / j["n"], 1.0) if j["n"] else 0.0, text=job_text(j))
-    st.caption("This keeps running if you open another page.")
 
 
 @st.fragment(run_every=2)
@@ -113,13 +112,13 @@ def jobs_sidebar():
     if any(j["status"] != "running" for j in jobs().values()):
         st.rerun(scope="app")
     for j in jobs().values():
-        st.caption(f"⏳ {job_text(j)}")
+        st.caption(job_text(j))
 
 
-def page_start(icon, title, subtitle=""):
+def page_start(title, subtitle=""):
     """Every page opens with the shared style and a header card."""
     st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown(f"<div class='edu-hero'><div class='t'>{icon} {title}</div>"
+    st.markdown(f"<div class='edu-hero'><div class='t'>{title}</div>"
                 + (f"<div class='s'>{subtitle}</div>" if subtitle else "") + "</div>", unsafe_allow_html=True)
 
 
@@ -136,7 +135,7 @@ def evidence_sources():
 
 
 def deck_label(s):
-    return f"{KIND_ICONS.get(s.get('kind') or 'pdf', '📄')} {s['name']}"
+    return s["name"]
 
 
 THEME_KEYS = ["base", "primaryColor", "backgroundColor", "secondaryBackgroundColor", "textColor", "borderColor",
@@ -227,10 +226,42 @@ def syllabus_units(source_ids_and_hashes):
     return units
 
 
-def active_syllabus_units():
+def all_syllabus_units():
     ex = excluded()
     keys = tuple((s["source_id"], s["hash"]) for s in sources() if s["role"] == "syllabus" and s["source_id"] not in ex)
     return syllabus_units(keys) if keys else []
+
+
+def active_syllabus_units():
+    """The units in use everywhere: only the chosen semester's, when one is chosen and the syllabus has it."""
+    units, chosen = all_syllabus_units(), pref("semester", None)
+    return syllabus.in_semester(units, chosen) if chosen in syllabus.semesters(units) else units
+
+
+def course_file_map():
+    """Each course's files: estimated, with the student's corrections on top."""
+    return syllabus.course_files(all_syllabus_units(), pref("course_files", {}))
+
+
+def semester_picker(key):
+    """A semester selector, only when the syllabus names semesters. One choice shared by every page."""
+    semesters = syllabus.semesters(all_syllabus_units())
+    if not semesters:
+        return
+    options = [ALL_SEMESTERS] + semesters
+    saved = pref("semester", None)
+    choice = st.selectbox("Semester", options, index=options.index(saved) if saved in options else 0, key=key)
+    set_pref("semester", None if choice == ALL_SEMESTERS else choice)
+
+
+def difficulty_picker(key, help=None):
+    """Easy / Medium / Hard, on one line; Medium first selected."""
+    return st.radio("Difficulty", quiz.DIFFICULTIES, index=quiz.DIFFICULTIES.index(quiz.DEFAULT_DIFFICULTY), key=key,
+                    horizontal=True, format_func=str.capitalize, help=help)
+
+
+def difficulty_label(level):
+    return (level or quiz.DEFAULT_DIFFICULTY).capitalize()
 
 
 def short_name(name, n=28):
@@ -245,8 +276,7 @@ def citation_chips(sources_, key):
     cols = st.columns(min(max(len(sources_), 3), 5))
     for i, s in enumerate(sources_):
         with cols[i % len(cols)]:
-            icon = "🌐" if s.get("url") else "📄"
-            with st.popover(f"{icon} {s['label']} · {s['pages']}", help=f"{s['source']} · {s['title']}", use_container_width=True):
+            with st.popover(f"{s['label']} · {s['pages']}", help=f"{s['source']} · {s['title']}", use_container_width=True):
                 st.markdown(f"**{s['source']}** · {s['pages']}  \n{s['title']}")
                 if s.get("url"):
                     st.markdown(f"[{s['url']}]({s['url']})")
@@ -264,18 +294,17 @@ def slide_actions(s, key):
     if not chunk:
         return
     a, b = st.columns(2)
-    if a.button("💬 Explain this slide", key=f"explain_{key}", use_container_width=True):
+    if a.button("Explain this slide", key=f"explain_{key}", use_container_width=True):
         st.session_state.pending_question = f"Explain \"{chunk['title']}\" ({short_name(chunk['source_name'], 40)}, {s['pages']})"
         if "pages" in st.session_state:
             st.switch_page(st.session_state.pages["ask"])
         st.rerun()
-    if b.button("🃏 Flashcards from it", key=f"cards_{key}", use_container_width=True):
+    if b.button("Flashcards from it", key=f"cards_{key}", use_container_width=True):
         with st.spinner("Writing cards from this slide..."):
             from edu_rag import flashcards
             cards = flashcards.from_passages([chunk], n=4, model=st.session_state.get("model"))
             added = flashcards.add(cards)
-        st.toast(f"Added {added} flashcard(s) from {s['pages']}" if added else "No new cards from this slide (already in the deck?)",
-                 icon="🃏")
+        st.toast(f"Added {added} flashcard(s) from {s['pages']}" if added else "No new cards from this slide (already in the deck?)")
 
 
 def page_preview(s):
@@ -290,6 +319,8 @@ def page_preview(s):
 
 
 def support_note(res):
+    if "worked example" in (res.get("answer") or "").lower():                   # the model does not always say the numbers are made up
+        st.caption("Worked examples can use numbers the model made up, and its arithmetic can be wrong. Check the steps against the cited pages.")
     cited = [s for s in res.get("support", []) if s["cited"]]
     weak = [s for s in cited if s["flag"] == "weak support"]
     if cited and len(weak) == len(cited):

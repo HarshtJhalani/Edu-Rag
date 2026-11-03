@@ -1,5 +1,6 @@
 """Indexes (notebook 03): embedding cache, Chroma collection, BM25. sync() keeps all three in line with data/ingested."""
 import hashlib
+import os
 import pickle
 import re
 import shutil
@@ -98,9 +99,19 @@ def build_bm25(chunks):
     data = {"bm25": BM25Okapi([tokenize(c["text"]) for c in chunks]) if chunks else None,
             "chunk_ids": [c["chunk_id"] for c in chunks], "chunk_settings": config.chunk_settings_hash()}
     Path(config.BM25_FILE).parent.mkdir(parents=True, exist_ok=True)
-    with open(config.BM25_FILE, "wb") as f:
+    tmp = Path(config.BM25_FILE).with_suffix(".tmp")
+    with open(tmp, "wb") as f:
         pickle.dump(data, f)
+    os.replace(tmp, config.BM25_FILE)                # all at once: index_stamp changes only when the file is complete
     return data
+
+
+def index_stamp():
+    """Changes whenever sync() finishes: BM25 is the last thing it writes, so chunks and Chroma are already updated."""
+    try:
+        return os.stat(config.BM25_FILE).st_mtime_ns
+    except OSError:
+        return None
 
 
 def load_bm25():
@@ -149,6 +160,8 @@ def add_file(name, data, role="textbook", progress=None, llm=None):
     """Store an uploaded file in its own library folder, ingest it (OCR as needed) and update the indexes.
     The LLM is unloaded first so the vision model has the GPU to itself; the vision model is unloaded after."""
     fname = Path(name).name
+    if not data:
+        raise ValueError("this file is empty (0 bytes). Download or export it again, then add the new copy.")
     folder = library.new_dir(role, fname, hashlib.sha1(data).hexdigest()[:12])
     (folder / fname).write_bytes(data)
     ollama_client.unload(llm or config.LLM)

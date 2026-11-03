@@ -10,7 +10,7 @@ from pathlib import Path
 
 import requests
 
-from . import config
+from . import config, ollama_client
 
 BULLETS = ("•", "▪", "◦", "‣", "●", "○", "■", "□", "➢", "➤", "►", "✓", "✔", "–", "- ", "* ")
 CODE_LINE_RE = re.compile(
@@ -18,6 +18,14 @@ CODE_LINE_RE = re.compile(
     r"for .+:$|if .+:$|while .+:$|elif .+:$|else:$|try:$|except\b.*:$|with .+:$)")
 MONO_HINTS = ("mono", "courier", "consol", "menlo", "inconsolata", "code")
 PAGE_NUM_RE = re.compile(r"(page\s*)?#(\s*(of|/)\s*#)?")
+INVISIBLE_TEXT = 3                                # PDF text render mode that scanners use for their OCR layer
+SCANNER_TEXT_SHARE = 0.9
+BAND_SHARE = 0.54                                 # each half of a tall page: 54% of its height, so they overlap
+OVERLAP_LINES = 15
+MIN_VISION_WORD_SHARE = 0.5
+ROW_TOLERANCE = 6                                 # points between word centres on one table row
+GARBLED_SHARE = 0.4                               # share of 1-2 letter words that marks broken scanner text
+MAPPING_PAGE = re.compile(r"mapp?in\S*\s+of\s+course", re.I)
 VISION_PROMPT = (
     "Transcribe ALL text in this image exactly as written. Rules:\n"
     "- If the image is a slide, put its title on the first line starting with '# '.\n"
@@ -201,7 +209,8 @@ def vision_ocr(png_bytes, model=None):
     """Local vision model -> markdown transcription. num_predict caps runaway generation."""
     r = requests.post(f"{config.OLLAMA_URL}/api/chat", timeout=600, json={
         "model": model or config.VISION_MODEL, "stream": False, "keep_alive": "5m",
-        "options": {"temperature": 0, "num_ctx": 4096, "num_predict": config.VISION_NUM_PREDICT, "repeat_penalty": 1.15},
+        "options": {"temperature": 0, "num_ctx": 4096, "num_predict": config.VISION_NUM_PREDICT, "repeat_penalty": 1.15,
+                    **ollama_client.cpu_options()},
         "messages": [{"role": "user", "content": VISION_PROMPT, "images": [base64.b64encode(png_bytes).decode()]}]})
     r.raise_for_status()
     return r.json()["message"]["content"]
@@ -272,6 +281,61 @@ def _ocr_engine():
     return _OCR["engine"]
 
 
+def join_bands(top, bottom):
+    """The two halves of a page overlap: leave out the bottom half's first lines when the top half already has them."""
+    norm = lambda line: re.sub(r"\W+", "", line).lower()
+    seen = norm("".join(top.splitlines()[-OVERLAP_LINES:]))
+    lines = bottom.splitlines()
+    i = 0
+    while i < min(OVERLAP_LINES, len(lines)) and norm(lines[i]) in seen:   # an empty line is "in" anything
+        i += 1
+    return top.rstrip() + "\n" + "\n".join(lines[i:])
+
+
+def vision_text(page, rect, dpi):
+    """A tall page is read as two overlapping halves: given the whole page, the vision model often stops after the first
+    table and silently drops the rest (page 7 of a syllabus lost its formula and a whole table)."""
+    import pymupdf as fitz
+    if rect.height <= rect.width:
+        return vision_ocr(page.get_pixmap(dpi=dpi, clip=rect).tobytes("png"))
+    cut = rect.height * BAND_SHARE
+    top = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + cut)
+    bottom = fitz.Rect(rect.x0, rect.y1 - cut, rect.x1, rect.y1)
+    return join_bands(*(vision_ocr(page.get_pixmap(dpi=dpi, clip=r).tobytes("png")) for r in (top, bottom)))
+
+
+def layer_rows(page):
+    """A page's text layer in reading order, row by row from the word positions: the layer's own order jumbles table columns."""
+    out, row, y = [], [], None
+    for w in sorted(page.get_text("words"), key=lambda w: ((w[1] + w[3]) / 2, w[0])):
+        mid = (w[1] + w[3]) / 2
+        if y is not None and mid - y > ROW_TOLERANCE:
+            out.append(row)
+            row, y = [], None
+        row.append(w)
+        y = mid if y is None else y
+    return "\n".join(" ".join(w[4] for w in sorted(r, key=lambda w: w[0])) for r in out + [row] if r)
+
+
+def is_garbled(text):
+    """Scanner text broken into single letters ('M o g VE a e a n d') cannot be repaired; a clean page is mostly whole words."""
+    words = re.findall(r"[A-Za-z]+", text)
+    return bool(words) and sum(len(w) <= 2 for w in words) / len(words) >= GARBLED_SHARE
+
+
+def careful_read(page, layer_blocks, use_vision=None):
+    """Vision text for one unreadable page of a syllabus; the scanner's text if vision fails or finds much less of the page."""
+    use_vision = config.USE_VISION_OCR if use_vision is None else use_vision
+    if not use_vision:
+        return layer_blocks
+    words = lambda blocks: len(re.findall(r"[A-Za-z]{3,}", " ".join(b["text"] for b in blocks)))
+    try:
+        blocks = markdown_to_blocks(vision_text(page, page.rect, config.OCR_DPI), page.rect.y0, page.rect.y1)
+    except requests.RequestException:
+        return layer_blocks
+    return blocks if words(blocks) >= MIN_VISION_WORD_SHARE * words(layer_blocks) else layer_blocks
+
+
 def ocr_page(page, dpi=None, clip=None, use_vision=None):
     """OCR the whole page or the rectangle `clip`. RapidOCR first; weak/code/table results go to the vision model."""
     import pymupdf as fitz
@@ -282,7 +346,7 @@ def ocr_page(page, dpi=None, clip=None, use_vision=None):
     blocks = ocr_result_to_blocks(result, dpi or config.OCR_DPI, offset=(rect.x0, rect.y0))
     if use_vision and needs_vision(blocks):
         try:
-            vblocks = markdown_to_blocks(vision_ocr(png), rect.y0, rect.y1)
+            vblocks = markdown_to_blocks(vision_text(page, rect, dpi or config.OCR_DPI), rect.y0, rect.y1)
             if vblocks:
                 if clip:
                     for b in vblocks:
@@ -373,6 +437,14 @@ def tag_headings(pages, ratio=1.15, max_len=150):
 
 # --- ingest / save / load -----------------------------------------------------
 
+def has_scanner_text(page):
+    """True for a scanned page whose scanner already added its OCR as invisible text over the picture. Lecture material then
+    uses that text as it is: reading the picture again took 16 minutes on 98 pages and stored each page twice. Visible text over a picture (exported slides) does not count."""
+    spans = page.get_texttrace()
+    total = sum(len(s["chars"]) for s in spans)
+    return bool(total) and sum(len(s["chars"]) for s in spans if s["type"] == INVISIBLE_TEXT) / total >= SCANNER_TEXT_SHARE
+
+
 def ingest_pdf(path, role="textbook", use_ocr=True, use_vision=None, progress=None, name=None):
     """progress(done_pages, total_pages) is called after each page, for the app's progress bar."""
     import pymupdf as fitz
@@ -386,7 +458,14 @@ def ingest_pdf(path, role="textbook", use_ocr=True, use_vision=None, progress=No
                 blocks = ocr_page(page, use_vision=use_vision)
                 if blocks:
                     ocr_pages.append(i + 1)
-            elif use_ocr and images:
+            elif use_ocr and role == "syllabus" and has_scanner_text(page):
+                text = layer_rows(page)                # instant; the slow vision model only where this is unreadable
+                blocks = [{"text": text, "size": 10.0, "is_code": False, "is_table": False, "is_heading": False, "bold": False,
+                           "y0": page.rect.y0, "y1": page.rect.y1}]
+                if is_garbled(text) and not MAPPING_PAGE.search(text):
+                    blocks = careful_read(page, blocks, use_vision)
+                    ocr_pages.append(i + 1)
+            elif use_ocr and images and not has_scanner_text(page):
                 area = page.rect.width * page.rect.height
                 for r in images:
                     r = fitz.Rect(r) & page.rect           # pictures can extend past the page edge
