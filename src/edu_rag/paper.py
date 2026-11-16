@@ -8,6 +8,7 @@ import time
 import unicodedata
 from collections import Counter
 
+from . import tracing
 from . import chunking, config, exam, export, generate, library, ollama_client, quiz, retrieve
 
 BLUEPRINT_FILE = "blueprint.json"
@@ -37,11 +38,83 @@ Question i must be answerable from passage [S i] and fit its slot:
 {slots}
 - Difficulty of the whole paper: {difficulty} The slot's marks still decide how long the answer is.
 - Write like a real exam paper ("Explain ...", "Differentiate between ...", "Write a program to ...", "What is ...?").
-  A 2-mark question asks for one fact; a long-answer question asks for explanation plus an example or program.
+  The slot's marks decide the size of the question: follow the size written in each slot.
+- Every question stands on its own: the student has only the question paper. Never point at a table, figure, equation,
+  problem, example, section or chapter by its number ("Table 10.2", "Problem 3.7", "Equation (8.7)"), and never write
+  "the given rules", "the provided functions", "in this context", "as outlined" or "as described". A question that needs
+  numbers or data states them in full. Ask about the concept, not about the particular numbers of one example in a passage.
 - Match the style of these questions from the student's previous papers, but never copy them:
 {examples}
 - Never mention the passages, the slides, their labels or the slides' example file names ("from listDemo.py"):
   a question that needs code includes the code."""
+
+
+BOOK_REF = re.compile(r"\b(?:problems?|tables?|figures?|fig\.|equations?|eqs?\.|examples?|sections?|chapters?)\s*\(?[A-Z]?\d+(?:\.\d+)*[a-z]?\)?"
+                      r"|\bas (?:outlined|described|given|shown|mentioned|discussed|illustrated|explained|presented)\b|\breference problems\b"
+                      r"|\bthe (?:given|above|following|provided) (?:rules?|tables?|figures?|relations?|examples?|data|method)\b(?!\s*[:=])"
+                      r"|\b(?:the|these|those|using|on) (?:given|provided)\b(?!\s+(?:values?|sets?|numbers?|data)\b[^.?]*[=:\d{])"
+                      r"|\bin this (?:context|example|case|problem)\b|\bgiven\s*[,.]|\bthe initial conditions\b"
+                      r"|\busing the (?:example|information|data|matrix|table|figure)\b(?! of\b)|\bcase \d"
+                      r"|\bas defined\b|\bdata[- ]tuples? of [A-Z]\b"
+                      r"|\b(?:the|this) [\w ]{0,30}?(?:matrix|relation|vector|set|table) [A-Z]\b(?![^.?]*(?:=|\[))", re.I)
+EXERCISE_TITLE = re.compile(r"^(?:REFERENCES|PROBLEMS|EXERCISES|BIBLIOGRAPHY|REVIEW QUESTIONS|FURTHER READING)\b")
+EXERCISE_ITEM = re.compile(r"^\s*\d{1,2}\.\d{1,2}\.?\s+\S", re.M)          # "3.7 Two fuzzy sets ..." : a textbook's problem list
+ONE_MARK_WORDS = 22                               # a 1-mark question is one line
+SECTION_Q = re.compile(r"^Q\.?\s*\d+$", re.I)
+CITE = re.compile(r"[ \t]*\[S?\d{1,2}\]")         # [S1], and the bare [5] the model sometimes writes instead
+LATEX_WORDS = {"sim": "~", "times": "×", "circ": "∘", "cdot": "·", "cap": "∩", "cup": "∪", "leq": "≤", "geq": "≥", "neq": "≠", "le": "≤",
+               "ge": "≥", "in": "∈", "to": "→", "rightarrow": "→", "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "lambda": "λ",
+               "mu": "μ", "theta": "θ", "xi": "ξ", "pi": "π", "sigma": "σ", "eta": "η", "sum": "Σ", "infty": "∞", "approx": "≈",
+               "left": "", "right": "", "quad": " ", "ldots": "...", "cdots": "...", "dots": "..."}
+CODE_ASKED = re.compile(r"\b(?:program|code|output|function|script|python|sql|query)\b", re.I)
+PROGRAM_CODE = re.compile(r"^\s*(?:def |print\(|if .*:\s*$|elif |else:\s*$|for .* in |while |import |return )", re.M)
+
+
+def is_exercise_page(chunk):
+    """A textbook's end-of-chapter problems or references: questions set from these point at the book ("from Problem 3.7")."""
+    return bool(EXERCISE_TITLE.match(chunking.clean_title(chunk["title"]).strip())) or len(EXERCISE_ITEM.findall(chunk["text"])) >= 3
+
+
+def size_rule(marks):
+    """What a question worth these marks asks for; the marks, not the level, decide how much the student writes."""
+    if marks <= 1:
+        return "ONE line, at most 18 words: Define, State, Name or What is. One term or one fact; no example, no calculation"
+    if marks <= 2:
+        return "one short point: a definition with a one-line example, or one difference between two things"
+    if marks <= 4:
+        return "explain one idea with an example, or one small calculation with every number stated in the question"
+    return "a full answer: explain in detail with a worked example, or solve a problem with every number stated in the question"
+
+
+def section_heading(s):
+    """'Q1. Attempt any TWO of the following. (1 mark each) [2]': the printed instruction already starts with the section's name."""
+    rest = re.sub(rf"^{re.escape(s['name'])}\s*[.:)\-]*\s*", "", s["instruction"], flags=re.I).strip()
+    return f"{s['name']}. {rest}" if rest else s["name"]
+
+
+def plain_math(text):
+    """LaTeX the model writes ('\\( S \\sim = I \\times T \\)') as plain text: the PDF and the page print it raw otherwise."""
+    t = re.sub(r"\\begin\{[a-z]*matrix\}(.*?)\\end\{[a-z]*matrix\}",
+               lambda m: "[" + "; ".join(" ".join(r.split("&")).strip() for r in m.group(1).split("\\\\")) + "]", text, flags=re.S)
+    for _ in range(3):                              # nested fractions
+        t = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1) / (\2)", t)
+    t = re.sub(r"\\[()\[\]]", "", t)
+    t = re.sub(r"\\(?:text|mathrm|mathbf|hat|tilde|bar)\{([^{}]*)\}", r"\1", t)
+    t = re.sub(r"\\([A-Za-z]+)", lambda m: LATEX_WORDS.get(m.group(1), m.group(1)), t)
+    t = re.sub(r"\\[{},;!]", "", t)
+    return re.sub(r"[ \t]{2,}", " ", t)
+
+
+def key_text(answer, question, code_ok=False):
+    """An answer as printed in the key: no [S#] labels (a key gives the answer, not where to look), no LaTeX, and no program
+    unless the question asks for one or its passages hold code (the model once wrote Python for a membership function;
+    a Python deque answer lost its examples when every unasked program was dropped)."""
+    t = plain_math(CITE.sub("", answer or ""))
+    if not (code_ok or CODE_ASKED.search(question)):
+        t = export.FENCE.sub(lambda m: "" if PROGRAM_CODE.search(m.group(1)) else m.group(0), t)
+    t = re.sub(r"[ \t]+([.,;:])", r"\1", t)
+    t = "\n".join(l for l in t.splitlines() if l.strip() not in {".", ":", ","})
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
 def norm(text):
@@ -90,13 +163,61 @@ def blueprint_from_questions(chunks):
             "total_marks": total_marks(sections)}
 
 
+BLUEPRINT_VERSION = 2                               # 2: the printed pattern is read in code first
+HEADER = re.compile(r"^\s*(section\s+[a-z]\b|q\.?\s*\d+\b)[^\n]*?(\d+)\s*marks?\s*each", re.I)
+ITEM = re.compile(r"^\s*(?:\(?[a-h]\)|\(?(?:i|ii|iii|iv|v|vi|vii|viii)\)|\d{1,2}[.)])\s+\S", re.I)
+ATTEMPT = re.compile(r"attempt\s+any\s+(\w+)", re.I)
+NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def printed_pattern(text):
+    """The pattern as printed, read in code: a header such as 'Q3. Attempt any ONE of the following. (4 marks each)' or
+    'SECTION B (Attempt any FOUR, 6 marks each)', then the items under it ('(a) ...' or '7. ...'). The LLM miscounted these on
+    sample papers (3 items where 2 were printed, 'attempt any' missed), so a pattern read here wins. None when the paper is not
+    laid out this way."""
+    sections, current = [], None
+    for line in norm_lines(text):
+        h = HEADER.match(line)
+        if h:
+            a = ATTEMPT.search(line)
+            word = a.group(1).lower() if a else ""
+            attempt = int(word) if word.isdigit() else NUMBERS.get(word)
+            name = h.group(1).strip().upper().replace(" ", "") if h.group(1).lower().startswith("q") else h.group(1).strip().title()
+            current = {"name": name, "instruction": line.strip()[:120], "attempt": attempt, "marks": int(h.group(2)), "n": 0}
+            sections.append(current)
+        elif current and ITEM.match(line):
+            current["n"] += 1
+    if not sections or any(s["n"] == 0 for s in sections):
+        return None
+    return [{"name": s["name"], "instruction": s["instruction"], "attempt": s["attempt"] if s["attempt"] and s["attempt"] < s["n"] else None,
+             "questions": [{"marks": s["marks"], "style": "explain"} for _ in range(s["n"])]} for s in sections]
+
+
+def norm_lines(text):
+    return [norm(l) for l in unicodedata.normalize("NFKC", text).splitlines() if l.strip()]
+
+
+def with_printed_pattern(bp, text):
+    """The LLM's reading, with the sections replaced by the printed pattern when one is found; the LLM's question styles are kept
+    in order where it saw the same number of questions."""
+    printed = printed_pattern(text)
+    if not printed:
+        return bp
+    styles = [q["style"] for s in bp.get("sections", []) for q in s["questions"]]
+    flat = [q for s in printed for q in s["questions"]]
+    if len(styles) == len(flat):
+        for q, st in zip(flat, styles):
+            q["style"] = st
+    return {**bp, "sections": printed, "total_marks": total_marks(printed), "read_by": "printed pattern"}
+
+
 def blueprint_for(source_id, model=None):
     """The paper's pattern, read once by the LLM and cached in its library folder (keyed by the file hash)."""
     folder, doc = library.find_dir(source_id), library.load_source(source_id)
     cache = folder / BLUEPRINT_FILE if folder else None
     if cache and cache.exists():
         data = json.loads(cache.read_text(encoding="utf-8"))
-        if data.get("hash") == doc["hash"]:
+        if data.get("hash") == doc["hash"] and data.get("version") == BLUEPRINT_VERSION:
             return data["blueprint"]
     msgs = [{"role": "system", "content": PATTERN_PROMPT}, {"role": "user", "content": f"Question paper:\n{paper_text(doc)}"}]
     raw, _ = ollama_client.chat(msgs, model=model, json_mode=True, temperature=0)
@@ -104,11 +225,12 @@ def blueprint_for(source_id, model=None):
         bp = clean_blueprint(json.loads(raw))
     except (ValueError, TypeError, AttributeError, KeyError):
         bp = {"sections": []}
+    bp = with_printed_pattern(bp, paper_text(doc))
     if not bp["sections"]:
         bp = blueprint_from_questions([c for c in chunking.load_chunks() if c["source_id"] == source_id])
     bp["source"] = doc["name"]
     if cache:
-        cache.write_text(json.dumps({"hash": doc["hash"], "blueprint": bp}, indent=1, ensure_ascii=False), encoding="utf-8")
+        cache.write_text(json.dumps({"hash": doc["hash"], "version": BLUEPRINT_VERSION, "blueprint": bp}, indent=1, ensure_ascii=False), encoding="utf-8")
     return bp
 
 
@@ -131,15 +253,17 @@ def topic_frequency(pyq_sources, sources=None, units=None):
     Returns {"questions": [...with slide/topic], "topics": [(topic, count)], "decks": [(deck, count)]}."""
     from . import syllabus
     qs = past_questions(pyq_sources)
-    hits = retrieve.dense_search_many([q["question"] for q in qs], n=5, sources=sources)
+    model = config.EMBED_MODEL                      # every question embedded once, in batches: one call each took 3 minutes for 460
+    qvecs = ollama_client.embed([q["question"] for q in qs], model, config.EMBEDDERS.get(model, {}).get("query_prefix", "")) if qs else None
+    hits = retrieve.dense_search_many([q["question"] for q in qs], n=5, sources=sources, qvecs=qvecs)
     by_id = retrieve.load_state()["by_id"]
-    for q, h in zip(qs, hits):
+    for i, (q, h) in enumerate(zip(qs, hits)):
         h = [(cid, s) for cid, s in h if not is_overview(by_id[cid])] if h else []   # "Contents" slides list everything
         c = by_id.get(h[0][0]) if h and h[0][1] >= config.PYQ_MIN_DENSE else None
         q.update(slide=c["chunk_id"] if c else None, deck=c["source_name"] if c else None,
                  topic=chunking.clean_title(c["title"]) if c else None, score=round(h[0][1], 3) if h else 0.0)
         if units:
-            s = syllabus.scope(q["question"], units)
+            s = syllabus.scope(q["question"], units, qvec=qvecs[i])
             q["unit"] = s["unit"] if s else None
             q["topic"] = s["topic"] if s else q["topic"]
     topics = Counter(q["topic"] for q in qs if q["topic"])
@@ -150,7 +274,7 @@ def topic_frequency(pyq_sources, sources=None, units=None):
 
 # --- 3. a new paper ---------------------------------------------------------------------------------
 
-def candidate_slides(freq, sources=None):
+def candidate_slides(freq, sources=None, only_asked_decks=True):
     """Slides to write questions from, with weights: the course's decks (those at least COURSE_DECK_MIN past questions
     match: one stray match from another course's deck does not count), weighted by how often each deck is asked,
     plus a bonus for the very slides past questions matched. All materials when no deck qualifies."""
@@ -160,7 +284,9 @@ def candidate_slides(freq, sources=None):
     for c in retrieve.load_state()["chunks"]:
         if c["role"] not in config.EVIDENCE_ROLES or (sources and c["source_id"] not in sources) or c["n_tokens"] < MIN_CHUNK_TOKENS:
             continue
-        if deck_w and c["source_name"] not in deck_w:
+        if only_asked_decks and deck_w and c["source_name"] not in deck_w:      # files the student picked are all kept
+            continue
+        if is_overview(c) or is_exercise_page(c):
             continue
         out[c["chunk_id"]] = deck_w.get(c["source_name"], 1) + 3.0 * asked[c["chunk_id"]]
     return out
@@ -195,7 +321,8 @@ def write_section(section, slides, past, model=None, rng=None, taken=(), difficu
     """One LLM call per section: question i from slide i, with its marks and style."""
     rng = rng or random.Random()
     level_styles = LEVEL_STYLES.get(difficulty, {})
-    slots = "\n".join(f"{i}. [S{i}] {q['marks']} marks, style: {level_styles.get(q['style'], q['style'])}"
+    slots = "\n".join(f"{i}. [S{i}] {q['marks']} mark{'s' if q['marks'] > 1 else ''}: {size_rule(q['marks'])}"
+                      + ("" if q["marks"] <= 2 else f"; style: {level_styles.get(q['style'], q['style'])}")
                       for i, q in enumerate(section["questions"], 1))
     same = [p["question"] for p in past if p["marks"] in {q["marks"] for q in section["questions"]}] or [p["question"] for p in past]
     examples = "\n".join(f"  - {e}" for e in rng.sample(same, min(4, len(same))))
@@ -214,8 +341,10 @@ def write_section(section, slides, past, model=None, rng=None, taken=(), difficu
     out = []
     for i, slot in enumerate(section["questions"][:len(slides)], 1):
         text = texts.get(i, "")
+        small = slot["marks"] <= 2                  # a 1 or 2-mark question is recall at every level
         if (len(text) < 10 or too_close(text, [p["question"] for p in past]) or too_close(text, taken, 0.5)
-                or not quiz.fits_level(text, difficulty)):
+                or not quiz.fits_level(text, "medium" if small else difficulty) or BOOK_REF.search(text)
+                or (slot["marks"] <= 1 and len(text.split()) > ONE_MARK_WORDS)):
             continue
         c, share = best_slide(text, slides)        # the model sometimes writes question i from another passage
         if share < MIN_SLIDE_SUPPORT:
@@ -236,11 +365,15 @@ def best_slide(question, slides):
     return c, share
 
 
-def make(blueprint, freq, sources=None, model=None, seed=None, progress=None, difficulty=quiz.DEFAULT_DIFFICULTY):
-    """A new paper in the blueprint's pattern at one level. Slots the model fills badly are retried with other slides."""
+@tracing.traced("question paper", "CHAIN", lambda blueprint, freq, **k: {"sections": len(blueprint.get("sections", [])), "difficulty": k.get("difficulty")},
+                lambda p: {"questions": sum(len(s["questions"]) for s in p.get("sections", [])), "seconds": p.get("seconds")})
+def make(blueprint, freq, sources=None, model=None, seed=None, progress=None, difficulty=quiz.DEFAULT_DIFFICULTY, only_asked_decks=True,
+         course=None):
+    """A new paper in the blueprint's pattern at one level. Slots the model fills badly are retried with other slides.
+    course: the subject the student chose, printed as the paper's title instead of the past paper's."""
     rng = random.Random(seed)
     t0 = time.time()
-    weights = candidate_slides(freq, sources)
+    weights = candidate_slides(freq, sources, only_asked_decks)
     past = freq["questions"]
     sections, used = [], set()
     for si, s in enumerate(blueprint["sections"]):
@@ -259,10 +392,12 @@ def make(blueprint, freq, sources=None, model=None, seed=None, progress=None, di
             progress(si + 1, len(blueprint["sections"]))
     n = 0
     for s in sections:
-        for q in s["questions"]:
+        lettered = bool(SECTION_Q.match(s["name"])) and len(s["questions"]) <= 26
+        for j, q in enumerate(s["questions"]):
             n += 1
-            q["n"] = n
-    return {"course": blueprint.get("course", ""), "exam": blueprint.get("exam", "Examination"),
+            q["n"] = n                              # the key and exam mode find a question by n
+            q["label"] = f"({chr(97 + j)})" if lettered else f"{n}."     # Q1 (a), (b), (c), as the past paper prints them
+    return {"course": course or blueprint.get("course", ""), "exam": blueprint.get("exam", "Examination"),
             "duration_minutes": blueprint.get("duration_minutes", 180), "instructions": blueprint.get("instructions", []),
             "sections": sections, "total_marks": total_marks(sections), "pattern_from": blueprint.get("source", ""),
             "difficulty": difficulty, "seconds": round(time.time() - t0, 1)}
@@ -272,6 +407,14 @@ def make(blueprint, freq, sources=None, model=None, seed=None, progress=None, di
 
 def exam_style(marks):
     """How long and how structured a full-marks answer is: roughly 25-35 words per mark, as university answers are."""
+    plain = (" Write every formula as plain text on ONE line, like m(D) = m1(A) x m2(B) / (1 - K): no LaTeX and no backslashes. "
+             "No program code unless the question asks for a program. Check every calculation step by step before writing its result.")
+    if marks <= 1:
+        return "A 1-mark exam answer: ONE or TWO sentences (15-35 words) giving exactly the definition or fact asked for. No list, no example." + plain
+    return _exam_style(marks) + plain
+
+
+def _exam_style(marks):
     if marks <= 2:
         return ("A 2-mark exam answer: a precise definition or the fact asked for in 2-3 sentences (40-70 words), "
                 "with a one-line example if the question asks for one.")
@@ -285,8 +428,11 @@ def exam_style(marks):
             "question compares things), **Conclusion** (1-2 sentences). If the question has several parts, cover each part.")
 
 
+@tracing.traced("answer key", "CHAIN", lambda paper, **k: {"questions": sum(len(s["questions"]) for s in paper.get("sections", []))},
+                lambda key: {"answers": len(key)})
 def answer_key(paper, sources=None, model=None, progress=None):
-    """{question n: generate() result}: a cited answer per question, from its own slide plus the best matches."""
+    """{question n: {"answer", "sources"}}: an answer per question, written from its own slide plus the best matches.
+    The answer is shown without citation labels; the sources are kept only as a record."""
     by_id = retrieve.load_state()["by_id"]
     qs = [q for s in paper["sections"] for q in s["questions"]]
     key = {}
@@ -295,43 +441,58 @@ def answer_key(paper, sources=None, model=None, progress=None):
         found = retrieve.retrieve(q["question"], k=extra + 1, sources=sources)[0]
         passages = [by_id[q["chunk_id"]]] + [c for c in found if c["chunk_id"] != q["chunk_id"]][:extra]
         res = generate.generate(q["question"], passages, 1.0, style=exam_style(q["marks"]), model=model)
-        key[q["n"]] = {"answer": res["answer"], "sources": res["sources"]}
+        code_ok = any(c.get("has_code") or "```" in c["text"] for c in passages)
+        key[q["n"]] = {"answer": key_text(res["answer"], q["question"], code_ok), "sources": res["sources"], "code_ok": code_ok}
         if progress:
             progress(i, len(qs))
     return key
 
 
-def header_html(paper, title_suffix=""):
+PAPER_NOTE = "Practice paper generated by Edu-RAG from your study material, in the pattern of your previous-year papers."
+KEY_NOTE = ("Model answers written by a local AI model from your study material. They can contain mistakes, above all in "
+            "calculations: check them against your notes.")
+
+
+def header_html(paper, title_suffix="", note=PAPER_NOTE):
     course = export.esc(paper["course"] or "Course")
     return (f"<h1 style='text-align:center'>{export.esc(paper['exam'])}{title_suffix}</h1>"
             f"<h2 style='text-align:center'>{course}</h2>"
             f"<p><b>Time: {paper['duration_minutes'] // 60} h {paper['duration_minutes'] % 60:02d} min</b> &nbsp;&nbsp; "
             f"<b>Max. Marks: {paper['total_marks']}</b> &nbsp;&nbsp; "
             f"<b>Difficulty: {export.esc(paper.get('difficulty', quiz.DEFAULT_DIFFICULTY).capitalize())}</b></p>"
-            + ("<p><i>" + " ".join(f"({i}) {export.esc(t)}" for i, t in enumerate(paper["instructions"], 1)) + "</i></p>"
-               if paper["instructions"] else "")
-            + "<p class='muted'>Generated by Edu-RAG from your slides, in the pattern of your previous-year papers.</p>")
+            + instructions_html(paper["instructions"])
+            + f"<p class='muted'>{export.esc(note)}</p>")
+
+
+def instructions_html(items):
+    """One instruction is a sentence; several are numbered."""
+    items = [t.strip()[:1].upper() + t.strip()[1:] for t in items if t.strip()]
+    if not items:
+        return ""
+    return "<p><i>" + (items[0] if len(items) == 1 else " ".join(f"({i}) {export.esc(t)}" for i, t in enumerate(items, 1))) + "</i></p>"
 
 
 def to_pdf(paper):
     parts = [header_html(paper)]
     for s in paper["sections"]:
-        parts.append(f"<h2>{export.esc(s['name'])} <span class='muted'>({export.esc(s['instruction'])})</span></h2>")
-        parts += [f"<p>{q['n']}. {export.esc(q['question'])} <b>[{q['marks']}]</b></p>" for q in s["questions"]]
+        parts.append(f"<h2>{export.esc(section_heading(s))}</h2>")
+        parts += [f"<p style='margin-left:14pt'>{label(q)} {export.esc(q['question'])} <b>[{q['marks']}]</b></p>" for q in s["questions"]]
     return export.html_to_pdf("".join(parts))
 
 
 def key_to_pdf(paper, key):
-    parts = [header_html(paper, " - Answer key")]
+    parts = [header_html(paper, " - Answer key", KEY_NOTE)]
     for s in paper["sections"]:
-        parts.append(f"<h2>{export.esc(s['name'])}</h2>")
+        parts.append(f"<h2>{export.esc(section_heading(s))}</h2>")
         for q in s["questions"]:
             k = key.get(q["n"]) or key.get(str(q["n"])) or {}
-            parts.append(f"<p class='q'>{q['n']}. {export.esc(q['question'])} [{q['marks']}]</p>")
-            parts.append(f"<div>{export.md_inline_to_html(k.get('answer') or '')}</div>")
-            if k.get("sources"):
-                parts.append("<p class='src'>" + "<br/>".join(export.esc(export.source_line(x)) for x in k["sources"]) + "</p>")
+            parts.append(f"<p class='q'>{label(q)} {export.esc(q['question'])} [{q['marks']}]</p>")
+            parts.append(f"<div>{export.md_inline_to_html(key_text(k.get('answer') or '', q['question'], k.get('code_ok', True)) or 'No answer could be written from your material.')}</div>")
     return export.html_to_pdf("".join(parts))
+
+
+def label(q):
+    return q.get("label") or f"{q['n']}."
 
 
 def to_exam(paper):

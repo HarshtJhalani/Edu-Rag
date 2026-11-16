@@ -6,6 +6,7 @@ import re
 
 import numpy as np
 
+from . import tracing
 from . import config, library, ollama_client, retrieve
 
 UNITS_FILE = "units.json"
@@ -27,6 +28,8 @@ SCAN_L_WORD = re.compile(r"\bl[a-z]{3,}\b")
 ASSIGNMENTS = re.compile(r"\bassignments?\s*:", re.I)
 COURSE_TOPICS_EMBEDDED = 40
 COURSE_FILE_MARGIN = 0.03                         # a file also belongs to courses this close to its best one
+BIG_FILE_PASSAGES = 200                           # a file this long is placed by its passages' votes, not its average
+BIG_FILE_VOTE_SHARE = 0.85                        # ... in every course that wins at least this share of the top course's votes
 TO_LETTERS = str.maketrans("501", "SOI")
 TO_DIGITS = str.maketrans("SOTRIL", "507111")
 OVERVIEW_TABLE = re.compile(r"course\s*type", re.I)   # the programme's structure tables, which may list only two courses
@@ -355,19 +358,43 @@ def file_vectors():
         for e, m in zip(got["embeddings"], got["metadatas"]):
             if m["role"] in config.EVIDENCE_ROLES:
                 groups.setdefault(m["source_id"], []).append(e)
-        vectors = {}
+        vectors, big = {}, {}
         for sid, rows in groups.items():
             v = np.mean(rows, axis=0)
             vectors[sid] = v / np.linalg.norm(v)
-        _STATE.update(file_stamp=st.get("stamp"), file_vectors=vectors)
+            if len(rows) >= BIG_FILE_PASSAGES:
+                e = np.asarray(rows, dtype=np.float32)
+                big[sid] = e / np.linalg.norm(e, axis=1, keepdims=True)
+        _STATE.update(file_stamp=st.get("stamp"), file_vectors=vectors, big_files=big)
     return _STATE["file_vectors"]
 
 
-def assign_files(files, courses, margin=None):
-    """{course: [source ids]} from unit vectors: each file goes to its best course and any course nearly as close."""
+def big_file_passages():
+    """{source id: passage vectors} of files with at least BIG_FILE_PASSAGES passages (filled by file_vectors)."""
+    file_vectors()
+    return _STATE.get("big_files", {})
+
+
+def voted_courses(passages, courses, share=None):
+    """Courses for a big file: each passage votes for its closest course; the file goes to the top course and any course with
+    nearly as many votes. The average of a 607-page textbook was close to almost every course (0.735-0.746), so the margin
+    rule put it in Machine Learning and Statistical Inference, whose generated papers then came from fuzzy logic."""
+    share = BIG_FILE_VOTE_SHARE if share is None else share
+    names = list(courses)
+    votes = np.bincount((passages @ np.stack([courses[c] for c in names]).T).argmax(1), minlength=len(names))
+    return [c for c, k in zip(names, votes) if k >= share * votes.max()]
+
+
+def assign_files(files, courses, margin=None, big=None):
+    """{course: [source ids]} from unit vectors: each file goes to its best course and any course nearly as close. A big file
+    (big: {source id: passage vectors}) goes by its passages' votes instead."""
     margin = COURSE_FILE_MARGIN if margin is None else margin
     out = {c: [] for c in courses}
     for sid, v in files.items():
+        if big and sid in big:
+            for c in voted_courses(big[sid], courses):
+                out[c].append(sid)
+            continue
         scores = {c: float(v @ cv) for c, cv in courses.items()}
         best = max(scores.values(), default=0)
         for c, s in scores.items():
@@ -381,9 +408,11 @@ def course_files(units, overrides=None):
     courses = course_vectors(units)
     if not courses:
         return {}
-    return {**assign_files(file_vectors(), courses), **{c: f for c, f in (overrides or {}).items() if c in courses}}
+    return {**assign_files(file_vectors(), courses, big=big_file_passages()), **{c: f for c, f in (overrides or {}).items() if c in courses}}
 
 
+@tracing.traced("syllabus coverage", "CHAIN", lambda units, **k: {"units": len(units), "topics": sum(len(u["topics"]) for u in units)},
+                lambda cov: {"topics": len(cov), "covered": sum(c["covered"] for c in cov)})
 def coverage(units, sources=None, progress=None, course_map=None):
     """For each topic: the best-matching slides among the student's materials, and whether the topic is covered. A topic of a
     course is searched only in that course's files: 'Control' or 'Case study' mean nothing without the subject around them."""

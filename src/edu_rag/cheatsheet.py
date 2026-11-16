@@ -3,7 +3,8 @@ The LLM writes bullets citing [S#]; code turns each citation into the real page 
 import re
 import time
 
-from . import chunking, config, export, generate, ollama_client, retrieve
+from . import tracing
+from . import chunking, export, generate, ollama_client, retrieve
 
 BATCH_TOKENS = 3000                               # passages per LLM call; leaves room in num_ctx for the answer
 TOPIC_K = 8
@@ -79,6 +80,8 @@ def group_sections(bullets):
     return out
 
 
+@tracing.traced("cheat sheet", "CHAIN", lambda source_id=None, topic=None, **k: {"source_id": source_id, "topic": topic},
+                lambda sheet: {"sections": len(sheet.get("sections", [])), "bullets": sum(len(s["bullets"]) for s in sheet.get("sections", []))})
 def make(source_id=None, topic=None, sources=None, model=None, progress=None, max_bullets=6):
     """A cheat sheet for one source (whole deck) or a topic. Returns {title, sections[{title, pages, bullets}], seconds}."""
     t0 = time.time()

@@ -1,7 +1,7 @@
 """Flashcards: cards written from the student's slides, reviewed with spaced repetition (Leitner boxes)."""
 import streamlit as st
 
-from edu_rag import config, flashcards
+from edu_rag import flashcards
 
 from . import common
 
@@ -101,7 +101,7 @@ def deck_tab(deck):
         return
     s = flashcards.stats(deck)
     st.bar_chart([{"box": b, "cards": n} for b, n in zip(BOX_NAMES, s["boxes"])], x="box", y="cards", x_label="", y_label="cards",
-                 horizontal=True, sort=False, height=220, color="#6366F1")
+                 horizontal=True, sort=False, height=220, color="#70587C")
     rows = [{"remove": False, "front": c["front"], "back": c["back"], "source": common.short_name(c["source"], 30),
              "page": c["pages"], "box": c["box"], "due": c["due"], "id": c["id"]} for c in deck]
     edited = st.data_editor(rows, hide_index=True, use_container_width=True, disabled=["front", "back", "source", "page", "box", "due"],

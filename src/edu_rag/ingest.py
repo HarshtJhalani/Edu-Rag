@@ -1,7 +1,6 @@
 """PDF / pasted-text ingestion (notebook 01): text layer first, OCR fallback, headers removed, titles and code tagged."""
 import base64
 import hashlib
-import json
 import re
 import statistics
 import time
@@ -10,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-from . import config, ollama_client
+from . import config, ollama_client, tracing
 
 BULLETS = ("•", "▪", "◦", "‣", "●", "○", "■", "□", "➢", "➤", "►", "✓", "✔", "–", "- ", "* ")
 CODE_LINE_RE = re.compile(
@@ -207,13 +206,16 @@ def ocr_result_to_blocks(result, dpi, offset=(0, 0), col_gap=1.5):
 
 def vision_ocr(png_bytes, model=None):
     """Local vision model -> markdown transcription. num_predict caps runaway generation."""
-    r = requests.post(f"{config.OLLAMA_URL}/api/chat", timeout=600, json={
-        "model": model or config.VISION_MODEL, "stream": False, "keep_alive": "5m",
-        "options": {"temperature": 0, "num_ctx": 4096, "num_predict": config.VISION_NUM_PREDICT, "repeat_penalty": 1.15,
-                    **ollama_client.cpu_options()},
-        "messages": [{"role": "user", "content": VISION_PROMPT, "images": [base64.b64encode(png_bytes).decode()]}]})
-    r.raise_for_status()
-    return r.json()["message"]["content"]
+    with tracing.span("vision OCR", "LLM", {"image_bytes": len(png_bytes)}, model=model or config.VISION_MODEL) as live:
+        r = requests.post(f"{config.OLLAMA_URL}/api/chat", timeout=600, json={
+            "model": model or config.VISION_MODEL, "stream": False, "keep_alive": "5m",
+            "options": {"temperature": 0, "num_ctx": 4096, "num_predict": config.VISION_NUM_PREDICT, "repeat_penalty": 1.15,
+                        **ollama_client.cpu_options()},
+            "messages": [{"role": "user", "content": VISION_PROMPT, "images": [base64.b64encode(png_bytes).decode()]}]})
+        r.raise_for_status()
+        j = r.json()
+        tracing.finish(live, j["message"]["content"], (j.get("prompt_eval_count", 0), j.get("eval_count", 0)))
+    return j["message"]["content"]
 
 
 def _flush_para(blocks, para):

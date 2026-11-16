@@ -5,7 +5,7 @@ import time
 import numpy as np
 import requests
 
-from . import config
+from . import config, tracing
 
 
 def _url(path):
@@ -67,30 +67,37 @@ def embed(texts, model=None, prefix="", batch=None, keep_alive="10m"):
     model = model or config.EMBED_MODEL
     batch = batch or config.EMBED_BATCH
     out = []
-    for i in range(0, len(texts), batch):
-        r = requests.post(_url("/api/embed"), timeout=300,
-                          json={"model": model, "input": [prefix + t for t in texts[i:i + batch]], "keep_alive": keep_alive,
-                                "options": cpu_options()})
-        r.raise_for_status()
-        out += r.json()["embeddings"]
-    v = np.asarray(out, dtype=np.float32).reshape(len(out), -1)
+    with tracing.span("embed", "EMBEDDING", {"texts": len(texts), "first": texts[0][:300] if len(texts) else ""}, model=model) as live:
+        for i in range(0, len(texts), batch):
+            r = requests.post(_url("/api/embed"), timeout=300,
+                              json={"model": model, "input": [prefix + t for t in texts[i:i + batch]], "keep_alive": keep_alive,
+                                    "options": cpu_options()})
+            r.raise_for_status()
+            out += r.json()["embeddings"]
+        v = np.asarray(out, dtype=np.float32).reshape(len(out), -1)
+        tracing.finish(live, {"vectors": len(v), "dimensions": int(v.shape[1]) if len(v) else 0}, on_cpu=config.CPU_ONLY)
     return v / np.linalg.norm(v, axis=1, keepdims=True) if len(v) else v
 
 
-def chat(messages, model=None, json_mode=False, temperature=None, keep_alive="10m", num_predict=None, images=None):
+def chat(messages, model=None, json_mode=False, temperature=None, keep_alive="10m", num_predict=None, images=None, seed=None):
     """Returns (text, stats). num_ctx is always set."""
     options = {"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE if temperature is None else temperature, **cpu_options()}
     options["num_predict"] = num_predict or (config.JSON_NUM_PREDICT if json_mode else config.ANSWER_NUM_PREDICT)
+    if seed is not None:
+        options["seed"] = seed
     body = {"model": model or config.LLM, "messages": messages, "stream": False, "keep_alive": keep_alive, "options": options}
     if json_mode:
         body["format"] = "json"
     t0 = time.time()
-    r = requests.post(_url("/api/chat"), timeout=600, json=body)
-    r.raise_for_status()
-    j = r.json()
-    return j["message"]["content"].strip(), {"seconds": round(time.time() - t0, 2),
-                                            "prompt_tokens": j.get("prompt_eval_count", 0),
-                                            "output_tokens": j.get("eval_count", 0)}
+    with tracing.span("chat", "CHAT_MODEL", {"messages": messages}, model=body["model"], json_mode=json_mode,
+                      temperature=options["temperature"], num_predict=options["num_predict"], on_cpu=config.CPU_ONLY) as live:
+        r = requests.post(_url("/api/chat"), timeout=600, json=body)
+        r.raise_for_status()
+        j = r.json()
+        text = j["message"]["content"].strip()
+        stats = {"seconds": round(time.time() - t0, 2), "prompt_tokens": j.get("prompt_eval_count", 0), "output_tokens": j.get("eval_count", 0)}
+        tracing.finish(live, text, (stats["prompt_tokens"], stats["output_tokens"]), hit_output_limit=stats["output_tokens"] >= options["num_predict"])
+    return text, stats
 
 
 def is_looping(text):
@@ -98,30 +105,39 @@ def is_looping(text):
     return len(text) >= config.LOOP_TAIL_CHARS * config.LOOP_REPEATS and text.count(tail) >= config.LOOP_REPEATS
 
 
-def chat_stream(messages, model=None, temperature=None, keep_alive="10m", on_token=None):
+def chat_stream(messages, model=None, temperature=None, keep_alive="10m", on_token=None, seed=None):
     """Like chat(), but calls on_token(piece) as text arrives. Returns (full text, stats). Stops as soon as the model starts
     repeating itself: on a processor the output limit alone would still mean over a minute of the same lines on screen."""
     options = {"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE if temperature is None else temperature,
                "num_predict": config.ANSWER_NUM_PREDICT, **cpu_options()}
+    if seed is not None:
+        options["seed"] = seed
     body = {"model": model or config.LLM, "messages": messages, "stream": True, "keep_alive": keep_alive, "options": options}
-    t0, parts, last, looped = time.time(), [], {}, False
-    with requests.post(_url("/api/chat"), json=body, stream=True, timeout=600) as r:
-        r.raise_for_status()
-        for line in r.iter_lines():
-            if not line:
-                continue
-            last = json.loads(line)
-            piece = last.get("message", {}).get("content", "")
-            if piece:
-                parts.append(piece)
-                if on_token:
-                    on_token(piece)
-                if "\n" in piece or len(parts) % 10 == 0:
-                    looped = is_looping("".join(parts))
-                    if looped:
-                        break                       # closing the connection makes Ollama stop writing
-    return "".join(parts).strip(), {"seconds": round(time.time() - t0, 2), "prompt_tokens": last.get("prompt_eval_count", 0),
-                                    "output_tokens": last.get("eval_count", 0), "looped": looped}
+    t0, parts, last, looped, first = time.time(), [], {}, False, None
+    with tracing.span("chat (streamed)", "CHAT_MODEL", {"messages": messages}, model=body["model"], temperature=options["temperature"],
+                      num_predict=options["num_predict"], on_cpu=config.CPU_ONLY) as live:
+        with requests.post(_url("/api/chat"), json=body, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                last = json.loads(line)
+                piece = last.get("message", {}).get("content", "")
+                if piece:
+                    first = first or round(time.time() - t0, 2)
+                    parts.append(piece)
+                    if on_token:
+                        on_token(piece)
+                    if "\n" in piece or len(parts) % 10 == 0:
+                        looped = is_looping("".join(parts))
+                        if looped:
+                            break                   # closing the connection makes Ollama stop writing
+        text = "".join(parts).strip()
+        stats = {"seconds": round(time.time() - t0, 2), "prompt_tokens": last.get("prompt_eval_count", 0),
+                 "output_tokens": last.get("eval_count", 0), "looped": looped}
+        tracing.finish(live, text, (stats["prompt_tokens"], stats["output_tokens"]), seconds_to_first_word=first, stopped_in_a_loop=looped,
+                       hit_output_limit=stats["output_tokens"] >= options["num_predict"])
+    return text, stats
 
 
 def pull(model):

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import tracing
 from . import chunking, config, ingest, library, ollama_client
 
 META_KEYS = ["chunk_id", "source_id", "source_name", "role", "page_start", "page_end",
@@ -156,6 +157,9 @@ def sync(model=None):
     return {"chunks": len(chunks), "stale_removed": len(stale), **stats, "sources": report}
 
 
+@tracing.traced("add file", "CHAIN", lambda name, data, role="textbook", **k: {"file": name, "bytes": len(data), "role": role},
+                lambda r: {"pages": r[0].get("n_pages"), "ocr_pages": len(r[0].get("ocr_pages", [])) + len(r[0].get("image_ocr_pages", [])),
+                           "vision_pages": len(r[0].get("vision_pages", []))})
 def add_file(name, data, role="textbook", progress=None, llm=None):
     """Store an uploaded file in its own library folder, ingest it (OCR as needed) and update the indexes.
     The LLM is unloaded first so the vision model has the GPU to itself; the vision model is unloaded after."""

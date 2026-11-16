@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import numpy as np
 import requests
 
-from . import config, generate, index, ingest, library, ollama_client, retrieve
+from . import config, generate, guardrails, index, ingest, library, ollama_client, retrieve, tracing
 
 NOTICE = "Go deeper sends your question to web search (Wikipedia, DuckDuckGo) and downloads the top pages. It leaves your computer."
 OFFLINE_LABEL = "AI-generated, not verified"
@@ -182,6 +182,9 @@ def offline_answer(question, style="concise", model=None):
                                {"role": "user", "content": f"Style: {generate.STYLES[style]}\n\nQuestion: {question}"}], model=model)
 
 
+@tracing.traced("go deeper (web)", "CHAIN", lambda question, style="concise", offline=False, **k: {"question": question, "offline": offline},
+                lambda r: {"answer": r.get("answer"), "mode": r.get("mode"), "pages": len(r.get("pages", [])), "citations_ok": r.get("citations_ok"),
+                           "urls": [s.get("url") for s in r.get("sources", [])]})
 def go_deeper(question, style="concise", offline=False, model=None):
     """Fixed pipeline, separate 'Beyond your materials' result. Only the question text leaves the machine."""
     t0 = time.time()
@@ -197,6 +200,10 @@ def go_deeper(question, style="concise", offline=False, model=None):
         res.update(mode="offline", label=OFFLINE_LABEL, answer=text, llm=stats, seconds=round(time.time() - t0, 2))
         return res
     passages, sims = web_retrieve(question, [c for p in pages for c in chunk_page(p)])
+    with tracing.span("guardrail: web pages", "GUARDRAIL", {"passages": len(passages)}) as guard:      # a web page is the likeliest place for a planted instruction
+        passages, removed = guardrails.clean_passages(passages)
+        tracing.finish(guard, {"removed": removed}, instructions_removed=len(removed))
+    res["guardrails"] = {"instructions_removed": removed}
     raw, stats = ollama_client.chat(generate.build_messages(question, passages, style, (), WEB_SYSTEM_PROMPT, "W"), model=model)
     res["llm"] = stats
     if config.INSUFFICIENT in raw:

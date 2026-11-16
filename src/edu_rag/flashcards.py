@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 
+from . import tracing
 from . import config, generate, ollama_client, quiz
 
 PROMPT = """You make study flashcards for a student from numbered passages of their course materials.
@@ -34,6 +35,8 @@ def validate(c, n_passages):
     return {"front": front, "back": back, "source_n": src}
 
 
+@tracing.traced("flashcards", "CHAIN", lambda n=12, source_ids=None, topic=None, **k: {"cards": n, "topic": topic},
+                lambda cards: {"written": len(cards), "fronts": [c["front"] for c in cards]})
 def make(n=12, source_ids=None, topic=None, model=None, seed=None, progress=None):
     """New cards (not yet saved) from a spread of slides, or from the passages that best match a topic."""
     passages = quiz.pick_passages(source_ids, topic, n=max(4, n // 2 + 2), seed=seed)

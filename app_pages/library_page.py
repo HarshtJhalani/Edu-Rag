@@ -1,7 +1,7 @@
 """Library: add files and notes, choose which sources answers may use, remove sources."""
 import streamlit as st
 
-from edu_rag import activity, chunking, config, index, ingest, previews, syllabus
+from edu_rag import activity, chunking, config, index, ingest, syllabus
 
 from . import common
 

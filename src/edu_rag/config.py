@@ -10,12 +10,15 @@ LIBRARY_DIR = DATA_DIR / "library"                # <role>/<source name>/: origi
 SOURCE_FILE = "source.json"
 INDEX_DIR = DATA_DIR / "index"                    # everything here can be rebuilt from the library
 CHUNKS_FILE = INDEX_DIR / "chunks.jsonl"
-CHUNK_SETTINGS_FILE = INDEX_DIR / "settings.json"
 CACHE_DIR = INDEX_DIR / "embed_cache"
 CHROMA_DIR = INDEX_DIR / "chroma"
 BM25_FILE = INDEX_DIR / "bm25.pkl"
 WEB_CACHE_DIR = DATA_DIR / "cache" / "web"
 APP_SETTINGS_FILE = DATA_DIR / "app_settings.json"
+MLFLOW_DIR = DATA_DIR / "mlflow"                  # traces of every answer and job, on this computer only (tracing.py)
+MLFLOW_URI = "sqlite:///" + (MLFLOW_DIR / "mlflow.db").as_posix()
+MLFLOW_EXPERIMENT = "edu-rag"
+TRACING = os.environ.get("EDU_RAG_TRACE") != "0"   # needs MLflow installed; without it the app runs untraced
 STUDY_DIR = DATA_DIR / "study"                    # the student's own progress: flashcard boxes
 FLASHCARDS_FILE = STUDY_DIR / "flashcards.json"
 QUESTIONS_LOG = STUDY_DIR / "questions.jsonl"     # asked questions + cited sources ("most asked" in the Library)
@@ -80,6 +83,10 @@ RARE_TERM_MAX_DF = 3                              # a query word in at most this
 
 # --- Generation (05) ------------------------------------------------------
 MAX_HISTORY_MESSAGES = 4
+GUARD_UNSUPPORTED = 0.40                          # answer words found in the passages: below this, almost none of it is from them
+GUARD_PARTLY = 0.58                               # below this, part of it probably is not (guardrails.support_level has the measurements)
+MAX_QUESTION_CHARS = 2000
+ANSWER_SEED = 7                                   # the same question, passages and style give the same answer every time
 SUPPORT_MIN = 0.35
 DENSE_FLOOR = 0.45                                # skip the LLM below this; lowest answerable question was 0.524
 INSUFFICIENT = "INSUFFICIENT_CONTEXT"

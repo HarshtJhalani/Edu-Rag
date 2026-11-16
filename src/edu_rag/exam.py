@@ -6,11 +6,13 @@ import random
 import re
 import unicodedata
 
+from . import tracing
 from . import config, generate, ollama_client, quiz, retrieve, syllabus
 
 UNIT_TOPICS_SEARCHED = 24
 DIFFICULTY_MARKS = {"easy": 2, "medium": 5, "hard": 10}   # marks of a generated question at each level
 MARKS_PATTERNS = [r"[\(\[]\s*(\d{1,2})\s*(?:marks?|m)?\s*[\)\]]\s*$", r"\b(\d{1,2})\s*marks?\b", r"\b(\d{1,2})\s*M\s*$"]
+MARKS_EACH = re.compile(r"\(\s*(\d{1,2})\s*marks?\s*each\s*\)", re.I)
 SECTION_LINE = re.compile(r"^\s*(section|part)\s+[a-e1-5]\b.*$", re.I | re.M)
 NUMBER_PREFIX = re.compile(r"^\s*(?:Q(?:uestion)?\.?\s*)?\d+\s*\(?[a-z]?\s*[.)]\s*|^\s*\(?[a-h]\)\s*", re.I)
 GEN_PROMPT = """You set exam questions for a university course from numbered passages of the course slides.
@@ -58,22 +60,36 @@ def question_text(chunk):
     return re.sub(r"\s+", " ", body)
 
 
-def marks_level(marks):
-    """A past question's level, judged by its marks: nobody labelled them, and marks are what the paper's setter gave."""
+def marks_level(marks, top=None):
+    """A past question's level, judged by its marks: nobody labelled them, and marks are what the paper's setter gave.
+    With top (the paper's highest marks), the level is the question's share of it, so a 25-mark mid-sem paper whose biggest
+    question is worth 5 still has hard questions; without it, the fixed 2/5/10-mark bands."""
+    if top:
+        share = marks / top
+        return "easy" if share <= 0.4 else "medium" if share <= 0.7 else "hard"
     return "easy" if marks <= 4 else "medium" if marks <= 8 else "hard"
 
 
 def past_paper_questions(sources=None, units=None, chosen_units=None):
     """Questions from the included past papers; with chosen_units, only questions that fall in those units."""
-    out = []
+    out, group_marks, top = [], {}, {}
     for c in retrieve.load_state()["chunks"]:
         if c["role"] != "pyq" or (sources and c["source_id"] not in sources):
             continue
-        text = question_text(c)
-        if len(text) < 15:
+        each = MARKS_EACH.search(c["text"].splitlines()[-1] if c["text"] else "")
+        if each:                                    # "Q1. Attempt any TWO ... (1 mark each)": marks for the questions under it
+            group_marks[c["source_id"]] = int(each.group(1))
             continue
-        marks = parse_marks(c["text"])
-        q = {"question": text, "marks": marks, "difficulty": marks_level(marks), "origin": "past paper", "source": c["source_name"],
+        text = question_text(c)
+        if len(text) < 15 or not retrieve.looks_like_question(text):
+            continue
+        marks = parse_marks(c["text"], default=-1)
+        marks = marks if marks > 0 else group_marks.get(c["source_id"], -1)
+        if marks > 0:                               # only printed marks say how big the paper's questions get
+            top[c["source_id"]] = max(top.get(c["source_id"], 0), marks)
+        else:
+            marks = config.EXAM_DEFAULT_MARKS
+        q = {"question": text, "marks": marks, "source_id": c["source_id"], "origin": "past paper", "source": c["source_name"],
              "pages": generate.page_label(c), "chunk_id": c["chunk_id"]}
         if chosen_units:
             hit = syllabus.scope(text, units)
@@ -81,6 +97,8 @@ def past_paper_questions(sources=None, units=None, chosen_units=None):
                 continue
             q["unit"] = hit["unit"]
         out.append(q)
+    for q in out:                                   # levels once each paper's highest marks are known
+        q["difficulty"] = marks_level(q["marks"], top.get(q.pop("source_id")))
     return out
 
 
@@ -138,6 +156,8 @@ def generate_questions(n, passages, model=None, seed=None, difficulty=quiz.DEFAU
     return out[:n]
 
 
+@tracing.traced("exam paper", "CHAIN", lambda n=5, minutes=30, **k: {"questions": n, "minutes": minutes, "difficulty": k.get("difficulty")},
+                lambda p: {"written": len(p["questions"]), "total_marks": p.get("total_marks"), "origins": [q.get("origin") for q in p["questions"]]})
 def build_paper(n=5, minutes=30, sources=None, pyq_sources=None, units=None, chosen_units=None, use_past_papers=True,
                 model=None, seed=None, difficulty=quiz.DEFAULT_DIFFICULTY, course_map=None):
     """{"questions", "minutes", "total_marks"}: past-paper questions of that level first (shuffled), then generated ones."""
@@ -154,6 +174,8 @@ def build_paper(n=5, minutes=30, sources=None, pyq_sources=None, units=None, cho
     return {"questions": qs, "minutes": minutes, "total_marks": sum(q["marks"] for q in qs), "difficulty": difficulty}
 
 
+@tracing.traced("mark exam answer", "CHAIN", lambda question, answer, **k: {"question": question.get("question"), "marks": question.get("marks"), "answer": answer},
+                lambda m: {"score": m.get("score"), "max": m.get("max"), "feedback": m.get("feedback")})
 def mark(question, answer, sources=None, model=None):
     """Marks one answer against the best-matching slide passages. Returns score, max, feedback, model answer, sources."""
     passages = retrieve.retrieve(question["question"], k=config.EXAM_MARK_K, sources=sources)[0]

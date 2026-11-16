@@ -4,7 +4,6 @@ Files already in the library (same name) are skipped, so the script can simply b
 """
 import sys
 import time
-from pathlib import Path
 
 from edu_rag import config, index, ingest, library
 

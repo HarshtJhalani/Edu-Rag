@@ -19,10 +19,14 @@ trafilatura
 # UI
 streamlit
 
-# dev
-ipykernel
-nbconvert
-# Office readers
+# tracing (optional: without it the app runs untraced)
+mlflow
+
+# Office and notebook readers
 python-pptx
 python-docx
 nbformat
+
+# dev (only for running the notebooks)
+ipykernel
+nbconvert

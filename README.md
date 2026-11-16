@@ -16,7 +16,7 @@ and nothing leaves the machine unless the student presses **Go deeper**.
 | **Go deeper (opt-in)** | Searches Wikipedia/DuckDuckGo, prefers trusted sites, answers with `[W#]` links and a "confirmed by 2 sources" badge, kept separate from the grounded answer. Pages can be added to the library. |
 | **Flashcards** | Cards written from the slides, reviewed with spaced repetition (Leitner boxes: known cards come back after 1, 2, 4, 8, 16 days; missed ones the same day). |
 | **Exam mode** | A timed mock paper: past-paper questions first (optionally only chosen syllabus units), topped up with exam-style questions from the slides. Auto-submits when time runs out; each answer is marked out of its marks with feedback and a model answer citing the slides. |
-| **Question-paper generator** | Learns the pattern of the student's previous-year papers (sections, marks, "attempt any N"), charts which topics they ask most, and writes a NEW paper in that pattern from the slides, weighted towards frequent topics. PDF paper, PDF answer key citing slide pages, or a timed attempt in Exam mode. |
+| **Question-paper generator** | Learns the pattern of the student's previous-year papers (sections, marks, "attempt any N"), charts which topics they ask most, and writes a NEW paper in that pattern from the slides, weighted towards frequent topics. Choose the subject and the files it draws from. Questions stand on their own (none point at a textbook table or problem) and are sized by their marks. PDF paper, PDF answer key with model answers sized by marks, or a timed attempt in Exam mode. |
 | **Practice quiz** | Multiple-choice and short-answer questions written from the student's slides, marked with feedback and the source slide. |
 | **Difficulty levels** | Easy (recall), Medium (understanding) or Hard (application and analysis) in the quiz, Exam mode and the question paper. Questions of the wrong kind are rejected in code and written again. In Exam mode the level also sets the marks (2 / 5 / 10) and picks past-paper questions by their marks; a generated paper keeps its past paper's marks. |
 | **Cheat sheet** | Revision notes for a deck or topic, every point with its page; download as Markdown or PDF. |
@@ -89,8 +89,10 @@ slides (and optionally past papers and a syllabus). Course material is **not** p
 
 ## Results
 
-Evaluated on 68 questions written from 10 lecture decks (52 answerable, 16 not covered by the slides;
-28 of them reworded to avoid slide wording). The full evaluation is described in the project report.
+Evaluated on 68 questions written from 10 lecture decks: 52 answerable, of which 22 are reworded to avoid slide
+wording, and 16 not covered by those decks. The questions and labels were verified by hand. The full evaluation,
+the 190 automated tests and every result file are described in the project report; the tests and result files are
+kept with the report, not in this repository.
 
 | What | Result |
 |---|---|
@@ -98,9 +100,12 @@ Evaluated on 68 questions written from 10 lecture decks (52 answerable, 16 not c
 | Full corpus (51 sources, ~2,600 passages) | hybrid BM25 + dense beats dense: gold slide found 0.904 → 0.942, hard-question recall 0.739 → 0.784, cites a gold page 0.86–0.88 → 0.904, 52/52 answered, same 2.3 s; the app now uses hybrid |
 | Reranker reordering (04) | hurt every dense configuration (nDCG@5 0.809 → 0.724), so it is off |
 | Answerable questions answered | 52 / 52 |
-| Questions the materials do not cover, refused | 7 / 16 on the full library |
+| Questions the materials do not cover, refused | 16 / 16 on the 10 decks; on the full library 8 of the 16 became covered, and the 7B model refused 7 of the other 8 (its one answer carried the "may not be supported" warning) |
 | Answers with valid citations | 52 / 52 |
 | Answers citing a correct page | about 90 % |
+| Judged answer quality (blind LLM judge, 7B) | 86 % of claims supported, correctness 4.81 / 5; RAGAS with a local judge failed a control test, so it is not used |
+| Guardrails | 7 / 7 attack messages blocked, 0 of 68 real questions blocked, planted instruction in a note removed |
+| Question papers (5 subjects, 80 slots) | 79 filled, 71 answerable from the paper alone; answer key 53 correct, 20 partly correct, 6 wrong |
 | Router vs fixed retrieval (06) | page recall 0.88 → 0.92 (hard questions 0.77 → 0.84; comparisons 0.85 → 1.00) |
 | Follow-up questions (06) | correct slide found 9/10 with the router's rewrite vs 7/10 without |
 | Answer time | about 2-3 s on an RTX 3070 Ti |
@@ -114,6 +119,30 @@ Design decisions the data changed (details in the notebooks):
   exam question does not *answer* anything.
 - Timings in notebooks 04-07 include a ~2 s per-request overhead from resolving `localhost` on Windows; the app uses
   `127.0.0.1` (see `config.py`).
+
+## Guardrails
+
+Checks in code around every answer, with no extra model call (`src/edu_rag/guardrails.py`):
+
+- **Question:** a message that gives the assistant instructions ("ignore your rules", "reveal your prompt", "you are now ...") gets a fixed reply and is never sent to the model. Very long messages are cut.
+- **Sources:** a sentence in a slide, note or web page that tries to instruct the assistant is removed before the model reads the passage. The student is told which source it was in.
+- **Answer:** the app measures how much of the answer's wording is in the passages it was given. Below 40% it shows a warning that the answer probably comes from the model's general knowledge; below 58% it shows a smaller note. The thresholds come from 155 hand-judged answers. An answer that repeats the prompt is withheld.
+- **Repeatable:** answer calls use a fixed seed. Ollama can still word the same answer in two slightly different ways, because it reuses cached work from earlier calls.
+
+Every guardrail step is recorded in the trace.
+
+## Tracing (LLMOps)
+
+Every answer is recorded as one trace with [MLflow](https://mlflow.org), stored only on this computer (`data/mlflow/mlflow.db`):
+
+- the steps: router, search (with the passages found and their score), each embedding call, each model call
+- for each model call: the prompt, the reply, input and output tokens, seconds, seconds to the first word, and whether it hit the output limit or was stopped in a loop
+- on the trace: model, answer style, route, GPU or processor, answered or refused (with the reason), whether the citations were valid
+- the student's thumbs up or down, attached to the answer it rates; answers of one chat share a session
+
+Quizzes, flashcards, cheat sheets, exam papers and marking, question papers, answer keys, Go deeper, uploads (with vision OCR calls) and syllabus coverage are traced the same way.
+
+Run `trace_ui.bat` and open http://127.0.0.1:5000 to browse the traces. Set `EDU_RAG_TRACE=0` to turn tracing off. Without MLflow installed the app runs untraced. Code: `src/edu_rag/tracing.py`.
 
 ## Project layout
 
@@ -139,8 +168,10 @@ src/edu_rag/           the system (plain functions, no classes)
   activity.py          asked questions and answer ratings (data/study/)
   export.py            chat -> Markdown / PDF, shared HTML -> PDF writer
   setup_check.py       first-launch checks
+  tracing.py           MLflow traces of every answer and job (optional)
+  guardrails.py        instruction checks on questions and sources, support level of answers
 notebooks/             01-07: prototypes and evaluations (historical; written before data/ was reorganised)
-scripts/               add_corpus.py (bulk import), migrate_library.py
+scripts/               add_corpus.py (bulk import)
 ```
 
 Created at runtime and not in the repository: `data/library/` (your material), `data/study/` (your flashcard
@@ -148,13 +179,14 @@ progress), `data/index/` and `data/cache/` (rebuilt automatically).
 
 ## Limitations and future work
 
-- Thresholds (syllabus scope, coverage, past papers) were tuned on small test sets; check them on real syllabi and papers.
+- Thresholds (syllabus scope, coverage, past papers) were tuned on small test sets; check them on more syllabi and papers.
 - The unanswerable set has 16 questions; the "insufficient context" signal needs a larger test.
+- Tested on one course, on one Windows machine, by one student; no user study yet.
 - Memory lasts within one chat (last 4 messages + follow-up rewriting); persistent memory across sessions and a
   learner profile of weak topics are future work.
 - Exam marking by the 7B model is strict: complete answers often get 60-80 % of the marks. Use the feedback and model
   answer, not the score alone. Ranking is sensible (wrong or blank answers get 0).
-- The paper generator was tested on two sample papers written for testing, not on real university papers. With few past
+- The paper generator was tested on 23 sample papers written in the university's mid-semester and end-semester patterns (one or more per taught subject), not on papers set in past examinations. Papers that number the items of a group "1.", "2.", "3." are read as one question per group. Answer keys are written by the local model and can contain mistakes, above all in calculations. With few past
   papers, topic frequencies are small counts; questions are checked against their slide (>= 30 % of their content words).
 - Difficulty levels are checked by question form, not validated against students or lecturers. Hard questions need the
   model to reason, so check surprising quiz answers against the cited slide: hard multiple-choice questions are dropped
@@ -163,6 +195,8 @@ progress), `data/index/` and `data/cache/` (rebuilt automatically).
 - Chat history lasts until the app is closed (export a chat to keep it).
 - A scanned syllabus uses the scanner's text with the vision model only on unreadable pages: fast, but course titles can keep scan typos, and unusually laid-out lists can be missed (one practical course on the test syllabus).
 - OCR occasionally misreads decorative slide layouts; the vision model's output is capped to stop runaway transcriptions.
+- Guardrails are word patterns tested on a small set of attacks; other attacks may get through.
+- The same question can be worded slightly differently each time, even with a fixed seed.
 
 ## License
 

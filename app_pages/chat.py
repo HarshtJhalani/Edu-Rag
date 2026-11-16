@@ -2,9 +2,11 @@
 import random
 import re
 
+import time
+
 import streamlit as st
 
-from edu_rag import activity, chunking, config, export, flashcards, generate, ollama_client, retrieve, router, syllabus, web
+from edu_rag import activity, chunking, config, export, flashcards, ollama_client, retrieve, router, syllabus, web, tracing
 
 from . import common
 
@@ -102,6 +104,7 @@ def answer_tools(msg, i):
     if rating is not None and msg.get("rated") != rating:
         msg["rated"] = rating
         activity.log_feedback(res.get("question", ""), res["answer"], rating, res.get("sources", []))
+        tracing.log_feedback(res.get("trace_id"), "thumbs_up", bool(rating))        # shown on the answer's trace in MLflow
         st.toast("Thanks, feedback saved." if rating else "Noted. Try another answer style, or Go deeper.")
 
 
@@ -125,7 +128,7 @@ def answer_live(question, history, style, model):
 
     ollama_client.unload(config.VISION_MODEL, wait=0)
     res = router.adaptive_answer(question, history, style, sources=common.evidence_filter(), model=model,
-                                 on_token=on_token, on_route=on_route)
+                                 on_token=on_token, on_route=on_route, session=trace_session())
     status.empty()
     box.markdown(res["answer"] or "")              # stays on screen while the steps below run; replaced right after
     units = common.active_syllabus_units()
@@ -138,6 +141,14 @@ def answer_live(question, history, style, model):
     hits = retrieve.past_papers(res["route"]["standalone_query"], sources=pyq) if pyq and res["route"]["type"] != "chitchat" else []
     box.empty()
     return res, hits
+
+
+def trace_session():
+    """One name per chat for the traces. The first question of a chat comes before the chat is saved, so the id is fixed here;
+    the start time keeps 'c1' of today apart from 'c1' after a restart."""
+    started = st.session_state.setdefault("session_started", time.strftime("%Y-%m-%d %H:%M"))
+    st.session_state.chat_id = st.session_state.get("chat_id") or new_chat_id()
+    return f"{started} {st.session_state.chat_id}"
 
 
 def new_chat_id():

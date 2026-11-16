@@ -5,7 +5,7 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-from . import config, library
+from . import library
 
 PREVIEW_PDF = "preview.pdf"
 PREVIEW_DIR = "previews"

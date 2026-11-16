@@ -1,7 +1,5 @@
 """Readers for PowerPoint, Word and Jupyter files. Each returns the same document shape as ingest.ingest_pdf,
 so chunking, indexing and citations treat them like any other source."""
-import hashlib
-import json
 import re
 import time
 from pathlib import Path

@@ -5,7 +5,7 @@ import re
 import time
 from collections import Counter
 
-from . import config, generate, index, ollama_client, retrieve
+from . import config, generate, guardrails, index, ollama_client, retrieve, tracing
 
 ROUTER_TYPES = ["definition", "conceptual", "compare", "followup", "chitchat"]
 CHITCHAT_REPLIES = {
@@ -219,21 +219,45 @@ def retrieve_for_route(r, roles=None, sources=None, limit=99):
     return p, top
 
 
-def adaptive_answer(message, history=(), style="concise", roles=None, sources=None, model=None, on_token=None, on_route=None):
+def adaptive_answer(message, history=(), style="concise", roles=None, sources=None, model=None, on_token=None, on_route=None, session=None):
     """on_route(route) is called once the strategy is known (the app shows it); on_token streams the answer."""
     t0 = time.time()
-    history = history if depends_on_chat(message) else ()
-    r = route(message, history, model=model)
-    if on_route:
-        on_route(r)
-    if r["type"] == "chitchat":
-        res = generate.empty_result(message, style)
-        res.update(abstained=True, abstain_reason="chitchat", answer=CHITCHAT_REPLIES[r.get("chitchat_kind", "other")])
-    else:
-        passages, top = retrieve_for_route(r, roles, sources, passage_limit(model))
-        # The answer step sees the standalone question, so follow-ups are answered about the right thing.
-        res = generate.generate(r["standalone_query"], passages, top, style, history, model, on_token)
-        res["question"] = message
-    res["route"] = r
-    res["seconds"] = round(time.time() - t0, 2)
+    with tracing.span("answer", "CHAIN", {"question": message, "style": style, "chat_messages": len(history)}) as live:
+        with tracing.span("guardrail: question", "GUARDRAIL", {"message": message}) as guard:
+            checked = guardrails.check_question(message)
+            tracing.finish(guard, {"flags": checked["flags"]}, blocked=bool(checked["reply"]))
+        if checked["reply"]:                        # an instruction for the assistant, not a question: the model is not asked
+            res = generate.empty_result(message, style)
+            res.update(abstained=True, abstain_reason="guardrail: instruction in the question", answer=checked["reply"],
+                       route={"type": "blocked", "standalone_query": message, "sub_queries": [], "by": "guardrail"},
+                       guardrails={"question": checked["flags"]}, seconds=round(time.time() - t0, 2))
+            tracing.finish(live, {"answer": res["answer"], "sources": []}, route="blocked", abstained=True, abstain_reason=res["abstain_reason"])
+            res["trace_id"] = tracing.tag_trace(live, session=session, model=model or config.LLM, style=style, route="blocked", outcome="blocked",
+                                                device="cpu" if config.CPU_ONLY else "gpu")
+            if on_route:
+                on_route(res["route"])
+            return res
+        message = checked["message"]
+        history = history if depends_on_chat(message) else ()
+        with tracing.span("route", "PARSER", {"message": message, "uses_chat": bool(history)}) as step:
+            r = route(message, history, model=model)
+            tracing.finish(step, {k: r.get(k) for k in ("type", "standalone_query", "sub_queries", "by")}, router_seconds=r.get("router_seconds"))
+        if on_route:
+            on_route(r)
+        if r["type"] == "chitchat":
+            res = generate.empty_result(message, style)
+            res.update(abstained=True, abstain_reason="chitchat", answer=CHITCHAT_REPLIES[r.get("chitchat_kind", "other")])
+        else:
+            passages, top = retrieve_for_route(r, roles, sources, passage_limit(model))
+            # The answer step sees the standalone question, so follow-ups are answered about the right thing.
+            res = generate.generate(r["standalone_query"], passages, top, style, history, model, on_token)
+            res["question"] = message
+        res["route"] = r
+        res["seconds"] = round(time.time() - t0, 2)
+        tracing.finish(live, {"answer": res["answer"], "sources": [f"{s.get('source')} {s.get('pages')}" for s in res.get("sources", [])]},
+                       route=r["type"], routed_by=r.get("by"), abstained=res["abstained"], abstain_reason=res.get("abstain_reason"),
+                       citations_ok=bool(res.get("citations_ok")), passages=len(res.get("retrieved", [])), top_score=res.get("top_dense"),
+                       seconds=res["seconds"])
+        res["trace_id"] = tracing.tag_trace(live, session=session, model=model or config.LLM, style=style, route=r["type"],
+                                            outcome="refused" if res["abstained"] else "answered", device="cpu" if config.CPU_ONLY else "gpu")
     return res

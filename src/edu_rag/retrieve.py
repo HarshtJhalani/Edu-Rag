@@ -1,9 +1,11 @@
 """Retrieval (notebooks 04/05): dense, BM25, RRF hybrid; hard role/source filters; reranker for past papers."""
 from collections import defaultdict
 
+import re
+
 import numpy as np
 
-from . import chunking, config, index, ollama_client
+from . import chunking, config, index, ollama_client, tracing
 
 _STATE = {}                                       # chunks, bm25, collection, reranker
 
@@ -116,20 +118,24 @@ def retrieve(q, k=None, roles=None, sources=None, method=None):
     cosine, raised to the floor when a rare-word match exists (an exact name match is never off-topic)."""
     st = load_state()
     method, k = method or config.RETRIEVAL_METHOD, k or config.K
-    dense = dense_search(q, roles=roles, sources=sources)
-    if method == "dense":
-        cands = dense
-    elif method == "bm25":
-        cands = bm25_search(q, roles=roles, sources=sources)
-    else:
-        cands = rrf(dense, bm25_search(q, roles=roles, sources=sources))
-    ids = [cid for cid, _ in cands]
-    top = float(dense[0][1]) if dense else 0.0
-    exact = rare_term_matches(q, roles, sources)[:k]
-    if exact:                                       # exact name matches go first; the rest keep their order
-        ids = exact + [cid for cid in ids if cid not in exact]
-        top = max(top, config.DENSE_FLOOR)
-    return [st["by_id"][cid] for cid in ids[:k] if cid in st["by_id"]], top, ids
+    with tracing.span("retrieve", "RETRIEVER", {"query": q}, method=method, k=k, sources_searched=len(sources) if sources else None) as live:
+        dense = dense_search(q, roles=roles, sources=sources)
+        if method == "dense":
+            cands = dense
+        elif method == "bm25":
+            cands = bm25_search(q, roles=roles, sources=sources)
+        else:
+            cands = rrf(dense, bm25_search(q, roles=roles, sources=sources))
+        ids = [cid for cid, _ in cands]
+        top = float(dense[0][1]) if dense else 0.0
+        exact = rare_term_matches(q, roles, sources)[:k]
+        if exact:                                   # exact name matches go first; the rest keep their order
+            ids = exact + [cid for cid in ids if cid not in exact]
+            top = max(top, config.DENSE_FLOOR)
+        found = [st["by_id"][cid] for cid in ids[:k] if cid in st["by_id"]]
+        tracing.finish(live, tracing.documents(found), top_score=round(top, 3), candidates=len(ids), rare_word_matches=len(exact),
+                       below_floor=top < config.DENSE_FLOOR)
+    return found, top, ids
 
 
 def reranker():
@@ -147,6 +153,22 @@ def rerank_scores(q, chunk_ids):
     return [float(s) for s in reranker().predict([(q, by_id[c]["text"]) for c in chunk_ids], batch_size=16)]
 
 
+QUESTION_NUMBER = re.compile(r"^\s*(?:Q(?:uestion)?\.?\s*)?\(?\d{1,2}[.):]?\)?\s+|^\s*\d{1,2}[.)]\s*$", re.I)
+
+
+ASKS = re.compile(r"^(what|why|how|when|where|which|who|whom|whose|is|are|can|does|do|explain|define|write|list|describe|differentiate|distinguish|compare|"
+                  r"give|state|discuss|illustrate|find|name|mention|enumerate|justify|demonstrate|implement|create|develop|design|draw|show|"
+                  r"predict|identify|outline|elaborate|construct|calculate|convert|evaluate|derive|prove|consider|suppose|analyse|analyze|"
+                  r"classify|summari[sz]e)\b", re.I)
+
+
+def looks_like_question(text):
+    """A real exam question asks something. A solved paper holds topics with their answers glued on ('Use of range() range(start,stop,step)
+    generates ...'), which made no sense as exam questions."""
+    t = re.sub(r"^\W+", "", text.strip())
+    return bool(ASKS.match(t) or re.search(r"\w\)?\s*\?(\s|$|\[|\()", t))     # a "?" that ends a sentence, not a regex symbol
+
+
 def past_papers(q, sources=None):
     """'Asked in past papers': past-paper questions on the same topic (dense cosine >= PYQ_MIN_DENSE)."""
     st = load_state()
@@ -154,6 +176,7 @@ def past_papers(q, sources=None):
     for cid, score in dense_search(q, n=config.PYQ_MAX_HITS, roles=["pyq"], sources=sources):
         if score >= config.PYQ_MIN_DENSE:
             c = st["by_id"][cid]
-            out.append({"source": c["source_name"], "page": c["page_start"], "score": round(score, 3),
-                        "text": c["text"].split("\n\n", 1)[-1], "chunk_id": cid})
+            text = QUESTION_NUMBER.sub("", c["text"].split("\n\n", 1)[-1].strip())
+            if len(text.split()) >= 3 and looks_like_question(text):     # not a bare number, heading or a solved paper's answer
+                out.append({"source": c["source_name"], "page": c["page_start"], "score": round(score, 3), "text": text, "chunk_id": cid})
     return out

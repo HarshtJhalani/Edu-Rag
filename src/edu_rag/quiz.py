@@ -4,6 +4,7 @@ import json
 import random
 import re
 
+from . import tracing
 from . import chunking, config, generate, index, ollama_client, retrieve
 
 MIN_CHUNK_TOKENS = 60                             # skip title-only and link slides
@@ -159,6 +160,8 @@ def shuffle_options(q, rng):
     return q
 
 
+@tracing.traced("quiz", "CHAIN", lambda n=6, source_ids=None, topic=None, **k: {"questions": n, "topic": topic, "difficulty": k.get("difficulty")},
+                lambda qs: {"written": len(qs), "questions": [q["question"] for q in qs]})
 def make(n=6, source_ids=None, topic=None, mcq_share=0.6, model=None, seed=None, progress=None, difficulty=DEFAULT_DIFFICULTY):
     """Returns a list of questions; each has its source chunk (for the citation and the slide preview)."""
     passages = pick_passages(source_ids, topic, seed=seed)
@@ -196,6 +199,8 @@ def mark_mcq(q, chosen_index):
             "feedback": q.get("explanation", "")}
 
 
+@tracing.traced("mark short answer", "CHAIN", lambda q, student_answer, **k: {"question": q.get("question"), "answer": student_answer},
+                lambda m: {"score": m.get("score"), "max": m.get("max"), "feedback": m.get("feedback")})
 def mark_short(q, student_answer, model=None):
     if not student_answer.strip():
         return {"score": 0, "max": 2, "feedback": "No answer given.", "correct": q["answer"]}

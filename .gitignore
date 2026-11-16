@@ -24,6 +24,9 @@ data/index/
 data/cache/
 # the student's flashcard deck and review history
 data/study/
+# traces of the student's questions and answers
+data/mlflow/
+mlruns/
 data/*.pdf
 
 # --- Personal / machine-specific -----------------------------------------------------

@@ -6,7 +6,7 @@ import streamlit as st
 
 from app_pages import (chat, cheatsheet_page, common, exam_page, flashcards_page, library_page, paper_page, quiz_page,
                        syllabus_page)
-from edu_rag import config, generate, ollama_client, setup_check
+from edu_rag import config, generate, ollama_client, setup_check, tracing
 
 ASSETS = Path(__file__).parent / "assets"
 
@@ -160,6 +160,7 @@ if not st.session_state.setup["ready"]:
     st.stop()
 
 common.warm_up()
+tracing.warm_up()                                 # MLflow loads in the background, so the first answer does not wait for it
 common.collect_jobs()                             # results of background jobs reach their pages
 st.session_state["model"] = setup_check.answer_model(st.session_state.setup, common.pref("cpu_model", setup_check.FASTER))
 sidebar().run()

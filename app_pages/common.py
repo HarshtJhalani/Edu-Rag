@@ -7,7 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from edu_rag import config, generate, library, previews, quiz, retrieve, syllabus
+from edu_rag import config, library, previews, quiz, retrieve, syllabus
 
 ALL_SEMESTERS = "All semesters"
 ROLE_LABELS = {"textbook": "Slides & textbooks", "note": "Notes", "web": "From the web", "pyq": "Past papers", "syllabus": "Syllabus"}
@@ -20,8 +20,8 @@ CSS = """
 footer {visibility: hidden;}
 .small-muted {color: rgba(128,128,128,0.95); font-size: 0.85rem;}
 .edu-hero {padding: 1.05rem 1.35rem; border-radius: 16px; margin-bottom: 1.1rem;
-  background: linear-gradient(120deg, rgba(99,102,241,0.16), rgba(168,85,247,0.08) 60%, rgba(99,102,241,0.02));
-  border: 1px solid rgba(99,102,241,0.22);}
+  background: linear-gradient(120deg, rgba(112,88,124,0.20), rgba(200,184,219,0.12) 60%, rgba(80,47,76,0.03));
+  border: 1px solid rgba(112,88,124,0.30);}
 .edu-hero .t {font-size: 1.65rem; font-weight: 750; letter-spacing: -0.01em; line-height: 1.25;}
 .edu-hero .s {opacity: 0.72; margin-top: 0.2rem; font-size: 0.95rem;}
 .edu-stats {display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0.2rem 0 1rem;}
@@ -31,7 +31,7 @@ footer {visibility: hidden;}
 .edu-stat .l {font-size: 0.78rem; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em;}
 .edu-card {min-height: 190px; display: flex; flex-direction: column; justify-content: center; align-items: center;
   text-align: center; padding: 1.6rem; border-radius: 18px; font-size: 1.3rem; line-height: 1.45;
-  border: 1px solid rgba(99,102,241,0.35); background: rgba(99,102,241,0.07);}
+  border: 1px solid rgba(112,88,124,0.40); background: rgba(200,184,219,0.12);}
 .edu-card .k {font-size: 0.75rem; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.6rem;}
 .edu-card.back {background: rgba(16,185,129,0.08); border-color: rgba(16,185,129,0.35); font-size: 1.1rem;}
 .edu-timer {font-variant-numeric: tabular-nums; font-size: 1.7rem; font-weight: 750; text-align: right;}
@@ -139,11 +139,14 @@ def deck_label(s):
 
 
 THEME_KEYS = ["base", "primaryColor", "backgroundColor", "secondaryBackgroundColor", "textColor", "borderColor",
-              "sidebar.backgroundColor", "codeBackgroundColor"]
+              "sidebar.backgroundColor", "codeBackgroundColor", "linkColor"]
 THEMES = {
-    "Light": ["light", "#6366F1", "#FFFFFF", "#F4F5FB", "#1F2433", "#E3E5EE", "#F7F8FC", "#F4F5FB"],
-    "Dark": ["dark", "#818CF8", "#0F111A", "#1A1D2B", "#E6E8F0", "#2A2E40", "#141724", "#1A1D2B"],
-    "System": [None] * 8,                         # Streamlit follows the OS; primary colour from config.toml
+    # Palette: Black 000000, Blackberry Cream 502F4C, Dusty Lavender 70587C, Thistle C8B8DB, Snow F9F4F5. The panel tints between
+    # them keep text at 15:1 or more. Buttons use Dusty Lavender in both themes: Streamlit writes white on the accent, and white on
+    # Thistle was 1.85:1. Links on black use Thistle (11:1).
+    "Light": ["light", "#70587C", "#F9F4F5", "#EFE7F0", "#1A1019", "#C8B8DB", "#EFE7F0", "#EFE7F0", "#70587C"],
+    "Dark": ["dark", "#70587C", "#000000", "#241722", "#F9F4F5", "#502F4C", "#1A1019", "#241722", "#C8B8DB"],
+    "System": [None] * 9,                         # Streamlit follows the OS; primary colour from config.toml
 }
 
 
@@ -155,7 +158,7 @@ def apply_theme(mode):
     changed = False
     for key, value in zip(THEME_KEYS, values):
         if value is None and key == "primaryColor":
-            value = "#6366F1"
+            value = "#70587C"
         if st_config.get_option(f"theme.{key}") != value:
             st_config.set_option(f"theme.{key}", value)
             changed = True
@@ -243,6 +246,28 @@ def course_file_map():
     return syllabus.course_files(all_syllabus_units(), pref("course_files", {}))
 
 
+ANY_SUBJECT = "Any subject (all my files)"
+
+
+def subject_and_files(page):
+    """Which subject the exam or paper is on, and the files its questions come from. The subject's files are ticked from the syllabus
+    estimate; the student can add or remove any file. Returns (course or None, the course's units, chosen file ids)."""
+    units = active_syllabus_units()
+    courses = list(dict.fromkeys(u["course"] for u in units if u.get("course") and u["topics"]))
+    course = st.selectbox("Subject", [ANY_SUBJECT] + courses, key=f"{page}_subject",
+                          help="Questions are set on this subject only: its syllabus units and its files.") if courses else ANY_SUBJECT
+    files = {s["source_id"]: s["name"] for s in evidence_sources()}
+    if course == ANY_SUBJECT:
+        default, course_units = list(files), units
+    else:
+        default = [f for f in course_file_map().get(course, []) if f in files]
+        course_units = [u for u in units if u.get("course") == course]
+    picked = st.multiselect("Files the questions come from", list(files), default=default, format_func=files.get,
+                            key=f"{page}_files_{course}", placeholder="Choose at least one file",
+                            help="Ticked from the syllabus: the files that match this subject. Add or remove any of them.")
+    return (None if course == ANY_SUBJECT else course), course_units, picked
+
+
 def semester_picker(key):
     """A semester selector, only when the syllabus names semesters. One choice shared by every page."""
     semesters = syllabus.semesters(all_syllabus_units())
@@ -321,9 +346,19 @@ def page_preview(s):
 def support_note(res):
     if "worked example" in (res.get("answer") or "").lower():                   # the model does not always say the numbers are made up
         st.caption("Worked examples can use numbers the model made up, and its arithmetic can be wrong. Check the steps against the cited pages.")
+    removed = (res.get("guardrails") or {}).get("instructions_removed") or []
+    if removed:
+        st.caption("A sentence that tried to give the assistant instructions was found in a source and left out: "
+                   + "; ".join(sorted({f"{r['source']}" + (f" p. {r['page']}" if r.get("page") else "") for r in removed})) + ".")
     cited = [s for s in res.get("support", []) if s["cited"]]
     weak = [s for s in cited if s["flag"] == "weak support"]
-    if cited and len(weak) == len(cited):
+    level = (res.get("grounding") or {}).get("level")
+    if level == "unsupported" and not res.get("abstained"):
+        st.warning("Most of this answer is not in the passages found in your materials. It probably comes from the model's general knowledge, "
+                   "so treat it as unverified: check the sources, or use Go deeper.", icon="⚠️")
+    elif level == "partly supported" and not res.get("abstained") and not (cited and len(weak) == len(cited)):
+        st.caption("⚠️ Parts of this answer may go beyond your materials. Check them against the cited pages.")
+    elif cited and len(weak) == len(cited):
         st.warning("Little of this answer appears in the cited passages. It may come from the model's general knowledge: "
                    "check the sources, or use Go deeper.", icon="⚠️")
     elif weak:

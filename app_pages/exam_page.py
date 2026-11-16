@@ -12,23 +12,24 @@ def setup_form(model):
     pyq = common.included_ids(["pyq"])
     with st.container(border=True):
         common.semester_picker("exam_semester")
-        units = common.active_syllabus_units()
+        course, units, files = common.subject_and_files("exam")
         all_units = common.all_syllabus_units()     # a past question is matched against all of them, or it always "fits" a semester
-        whole_syllabus = len(units) == len(all_units)
+        whole_syllabus = course is None and len(units) == len(all_units)
         c1, c2 = st.columns(2)
         n = c1.slider("Questions", 2, 10, 4)
         minutes = c2.slider("Time (minutes)", 5, 120, 20, step=5)
         level = common.difficulty_picker("exam_difficulty",
                                          help="Easy = 2-mark recall questions, Medium = 5-mark explanations, Hard = 10-mark "
-                                              "application and analysis. Past-paper questions are chosen by their marks.")
+                                              "application and analysis. Past-paper questions are judged by their marks "
+                                              "against the biggest question on the same paper.")
         chosen = st.multiselect("Syllabus units", [u["name"] for u in units if u["topics"]], placeholder="All units") if units else []
-        chosen = chosen or ([] if whole_syllabus else [u["name"] for u in units if u["topics"]])   # a semester limits the paper
+        chosen = chosen or ([] if whole_syllabus else [u["name"] for u in units if u["topics"]])   # a subject or semester limits the paper
         use_pyq = st.toggle("Use my past-paper questions first", value=bool(pyq), disabled=not pyq,
-                            help="Questions from your uploaded previous-year papers; the rest are written from your slides."
-                            if pyq else "Upload previous-year papers in the Library to use them here.")
-        if st.button("Start exam", type="primary", disabled=common.running("exam_build")):
-            sources = common.evidence_filter()
-            course_map = common.course_file_map()
+                            help="Questions from your uploaded previous-year papers that match this subject; the rest are written from "
+                                 "the chosen files." if pyq else "Upload previous-year papers in the Library to use them here.")
+        if st.button("Start exam", type="primary", disabled=common.running("exam_build") or not files):
+            sources = files
+            course_map = {**common.course_file_map(), course: files} if course else common.course_file_map()
 
             def keep(paper):                        # the clock starts when the paper is ready
                 if paper["questions"]:
