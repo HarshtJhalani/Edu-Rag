@@ -216,6 +216,16 @@ def included_ids(roles):
     return ids
 
 
+def flashcard_deck():
+    """(cards whose deck is in the library and switched on, how many are hidden). Cards of a removed deck are kept on
+    disk, not deleted: a source's id comes from its file, so adding the same file again brings its cards and their
+    progress back."""
+    from edu_rag import flashcards
+    deck, live = flashcards.load(), set(included_ids(config.EVIDENCE_ROLES))
+    shown = [c for c in deck if c.get("source_id") in live]
+    return shown, len(deck) - len(shown)
+
+
 def evidence_filter():
     return included_ids(config.EVIDENCE_ROLES) or ["__none__"]
 
@@ -229,10 +239,23 @@ def syllabus_units(source_ids_and_hashes):
     return units
 
 
-def all_syllabus_units():
+def syllabus_sources():
+    """Syllabi switched on in the Library."""
     ex = excluded()
-    keys = tuple((s["source_id"], s["hash"]) for s in sources() if s["role"] == "syllabus" and s["source_id"] not in ex)
-    return syllabus_units(keys) if keys else []
+    return [s for s in sources() if s["role"] == "syllabus" and s["source_id"] not in ex]
+
+
+def chosen_syllabus():
+    """The syllabus in use: the student's choice (students studying together can each keep their own programme's
+    syllabus in one library), else the first one."""
+    sylls = syllabus_sources()
+    saved = pref("syllabus", None)
+    return next((s for s in sylls if s["source_id"] == saved), sylls[0] if sylls else None)
+
+
+def all_syllabus_units():
+    s = chosen_syllabus()
+    return syllabus_units(((s["source_id"], s["hash"]),)) if s else []
 
 
 def active_syllabus_units():
@@ -268,8 +291,29 @@ def subject_and_files(page):
     return (None if course == ANY_SUBJECT else course), course_units, picked
 
 
+def syllabus_picker(key):
+    """A syllabus selector whenever a syllabus is switched on (so students studying together can see they may add
+    their own). One choice shared by every page."""
+    sylls = syllabus_sources()
+    if not sylls:
+        return
+    ids = [s["source_id"] for s in sylls]
+    names = {s["source_id"]: short_name(s["name"], 60) for s in sylls}
+    current = chosen_syllabus()["source_id"]
+    choice = st.selectbox("Syllabus", ids, index=ids.index(current), format_func=names.get, key=key,
+                          help="Studying with others on a different programme? Upload their syllabus on the Library page "
+                               "(file type Syllabus) and pick it here. Semesters, subjects, past-paper units and coverage follow "
+                               "this choice.")
+    if choice != current:
+        set_pref("syllabus", choice)
+        set_pref("semester", None)                  # the other syllabus may not have the same semesters
+        st.rerun()
+
+
 def semester_picker(key):
-    """A semester selector, only when the syllabus names semesters. One choice shared by every page."""
+    """The syllabus selector (when there are several), then a semester selector, only when the syllabus names
+    semesters. One choice shared by every page."""
+    syllabus_picker(f"{key}_syllabus")
     semesters = syllabus.semesters(all_syllabus_units())
     if not semesters:
         return

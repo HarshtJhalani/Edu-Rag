@@ -21,8 +21,11 @@ STYLES = {
     "step-by-step": "Answer as a numbered list of steps.",
     "worked example": ("First explain in one or two sentences. Then write the heading **Worked example** and walk through one example step by step, "
                        "even when the question only needs a yes or no. "
-                       "Use code or numbers from the passages. If the passages have none, apply what they say to small numbers of your own "
-                       "and say that those numbers are made up."),
+                       "Use code or numbers from the passages; if they give a long list or table, take a small part of it (at most 10 "
+                       "values) so that every step can be counted by hand. If the passages have none, apply what they say to small "
+                       "numbers of your own and say that those numbers are made up. Work the example in sentences and short lists, "
+                       "showing each calculation. Never show what a program prints or returns unless the passages show that output, "
+                       "and write code only when the question asks for a program."),
 }
 
 
@@ -96,7 +99,25 @@ def tidy_answer(text, question, prefix="S"):
     mention = rf"\b(?:according to|as stated in|as mentioned in|based on|from|in)\s+(?:the\s+)?passages?\s*(?:\[?{prefix}\d+\]?)?\s*,?\s*(?:it\s+states\s+that\s+)?"
     text = re.sub(r"[ \t]*" + mention + r"(?=[.;])", "", text, flags=re.I)         # no gap left before the full stop
     text = re.sub(mention, "", text, flags=re.I).strip()
+    text = re.sub(r"\\\[\s*(.+?)\s*\\\]", lambda m: f"$${m.group(1)}$$", text, flags=re.S)     # LaTeX \[..\] and \(..\): Streamlit
+    text = re.sub(r"\\\(\s*(.+?)\s*\\\)", lambda m: f"${m.group(1)}$", text, flags=re.S)       # shows maths only between $ signs
     return text[:1].upper() + text[1:] if text else text
+
+
+NOT_COVERED_SAID = re.compile(r"\b(?:not\s+(?:explicitly\s+|directly\s+)?(?:mentioned|covered|discussed|described|explained|defined|found|"
+                              r"provided|included)\s+in\s+(?:the\s+)?(?:provided\s+|given\s+)?(?:passages?|materials?|context)|"
+                              r"(?:passages?|materials?|context)\s+(?:do(?:es)?\s+not|don'?t)\s+(?:mention|cover|discuss|contain|describe|explain|"
+                              r"provide|include))", re.I)
+
+
+def says_not_covered(text, prefix="S"):
+    """A short answer whose message is only that the passages do not cover the question (the 7B wrote 'Hidden Markov models are
+    not explicitly mentioned in the provided passages. Therefore, [S1]...[S8].'). A longer answer that notes a gap and
+    then explains something stays an answer: the sentences saying so are set aside, and fewer than 5 content words may remain."""
+    if not NOT_COVERED_SAID.search(text):
+        return False
+    rest = re.sub(r"[^.!?,;\n]*(?:" + NOT_COVERED_SAID.pattern + r")[^.!?,;\n]*", " ", cite_pattern(prefix).sub("", text), flags=re.I)
+    return len(content_words(rest) - {"therefore", "however", "thus", "hence"}) < 5
 
 
 def only_citations(text, prefix="S"):
@@ -232,6 +253,9 @@ def write_answer(out, question, passages, style, history, model, on_token):
     text, valid, invalid = parse_citations(title_citations_to_labels(tidy_answer(body, question), passages), len(passages))
     if only_citations(text):                        # 3B once answered a question with just '[S1]'
         out.update(abstained=True, abstain_reason="model wrote no answer", answer=config.ABSTAIN_MSG)
+        return out
+    if says_not_covered(text):                      # a refusal in its own words, with citations that support nothing
+        out.update(abstained=True, abstain_reason="model said the passages do not cover it", answer=config.ABSTAIN_MSG)
         return out
     with tracing.span("guardrail: answer", "GUARDRAIL", {"answer": text}) as guard:
         if guardrails.leaks_prompt(text):           # the model repeated its own instructions: nothing to show

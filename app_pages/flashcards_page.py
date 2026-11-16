@@ -116,9 +116,12 @@ def deck_tab(deck):
 def page():
     model = st.session_state["model"]
     common.page_start("Flashcards", "Cards from your own slides. Cards you know come back less often; missed ones come back today.")
-    deck = flashcards.load()
+    deck, hidden = common.flashcard_deck()
     s = flashcards.stats(deck)
     common.stats_row([(s["due"], "due now"), (s["total"], "cards"), (s["new"], "never reviewed"), (s["mastered"], "well known")])
+    if hidden:
+        st.caption(f"{hidden} card(s) are hidden because their deck is not in your library or is switched off. "
+                   "Add the same file again, or switch it on, and they come back with their progress.")
     t1, t2, t3 = st.tabs(["Study", "Make cards", "Deck"])
     with t1:
         study_tab(deck)

@@ -45,7 +45,7 @@ def add_files(items, role, model, progress):
                 units = syllabus.units_for(doc["source_id"], model=model,
                                            progress=lambda i, n: progress(i, n, f"{name}: reading course {i} of {n}"))
                 progress(1, 1, f"{name}: preparing the topics for search")
-                syllabus.prepare_vectors(units)     # now, or the chat and the Syllabus page would wait for it
+                syllabus.prepare_vectors(units)     # now, or the Syllabus page would wait for it
                 results.append(f"✅ {name}: {sum(len(u['topics']) for u in units)} topics in {len(units)} units")
         except Exception as e:
             results.append(f"❌ {name}: {e}")
@@ -103,9 +103,11 @@ def source_rows(model):
                     a, b, _ = st.columns([1, 1, 4])
                     if a.button("Remove", key=f"yes_{sid}", type="primary"):
                         with st.spinner("Removing..."):
-                            index.remove_source(sid)
+                            res = index.remove_source(sid)
                         common.refresh_indexes()
                         st.session_state.pop("confirm_remove")
+                        if res.get("leftover"):             # removed from the search, but Windows kept a file open
+                            st.session_state.remove_leftover = res["leftover"]
                         st.rerun()
                     if b.button("Cancel", key=f"no_{sid}"):
                         st.session_state.pop("confirm_remove")
@@ -118,6 +120,9 @@ def page():
     model = st.session_state["model"]
     common.page_start("Library", f"Everything you add is kept in <code>{config.LIBRARY_DIR}</code>, one folder per source. "
                       "Untick a source to leave it out of answers, quizzes and cheat sheets.")
+    if left := st.session_state.pop("remove_leftover", None):
+        st.warning(f"Removed from your library and from every answer, but Windows kept a file open, so the folder "
+                   f"`{left}` is still on disk. Close the program using it and delete the folder.")
     srcs = common.sources()
     roles = [s["role"] for s in srcs]
     common.stats_row([(roles.count("textbook"), "slide decks & books"), (roles.count("note"), "notes"), (roles.count("web"), "web pages"),

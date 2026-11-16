@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import time
 from pathlib import Path
 
 from . import config
@@ -71,10 +72,17 @@ def original_file(source_id, root=None):
     return p if p and p.exists() else None
 
 
-def delete_source(source_id, root=None):
-    """Remove the source's folder (original file, source.json, previews). Only that folder is touched."""
+def delete_source(source_id, root=None, tries=5):
+    """Remove the source's folder (original file, source.json, previews). Only that folder is touched.
+    source.json goes first, so the source leaves the library even when Windows keeps another file locked for a
+    moment (a PDF viewer, search indexing, antivirus); the rest is retried. Returns the folder if anything is left."""
     folder = find_dir(source_id, root)
-    if folder and folder.parent.parent == Path(root or config.LIBRARY_DIR):
-        shutil.rmtree(folder)
-        return True
-    return False
+    if not folder or folder.parent.parent != Path(root or config.LIBRARY_DIR):
+        return None
+    (folder / config.SOURCE_FILE).unlink(missing_ok=True)
+    for i in range(tries):
+        shutil.rmtree(folder, ignore_errors=True)
+        if not folder.exists():
+            return None
+        time.sleep(0.5 * (i + 1))
+    return folder

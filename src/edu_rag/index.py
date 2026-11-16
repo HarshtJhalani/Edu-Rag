@@ -187,7 +187,22 @@ def add_source(doc, files=None, model=None):
     return sync(model)
 
 
+def prune_embed_cache(chunks):
+    """Delete cached vectors of files no chunk comes from any more (a removed source), for every embedding model."""
+    used = {c["doc_hash"][:16] for c in chunks}
+    removed = 0
+    for p in Path(config.CACHE_DIR).glob("*/*.npz"):
+        if p.name[:16] not in used:
+            p.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def remove_source(source_id, model=None):
-    """Remove a source's folder from the library (original file included) and from the indexes."""
-    library.delete_source(source_id)
-    return sync(model)
+    """Remove a source completely: its library folder (original file, previews), its chunks in chunks.jsonl, Chroma
+    and BM25, and its cached vectors."""
+    leftover = library.delete_source(source_id)     # source.json is gone even if a locked file stays behind
+    result = sync(model)                            # so its chunks always leave the search
+    result["cache_files_removed"] = prune_embed_cache(chunking.load_chunks())
+    result["leftover"] = str(leftover) if leftover else None
+    return result

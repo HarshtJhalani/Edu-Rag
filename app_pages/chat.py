@@ -7,7 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from edu_rag import activity, chunking, config, export, flashcards, ollama_client, retrieve, router, syllabus, web, tracing
+from edu_rag import activity, chunking, config, export, flashcards, ollama_client, retrieve, router, web, tracing
 
 from . import common
 
@@ -35,9 +35,6 @@ def badges(res):
     parts = []
     if r.get("type") and r["type"] != "chitchat":
         parts.append(f":violet-badge[{ROUTE_LABELS.get(r['type'], r['type'])} · {len(res.get('retrieved', []))} passages]")
-    scope = res.get("scope")
-    if isinstance(scope, dict):                     # chats from before this change may still hold "outside"
-        parts.append(f":green-badge[{scope['unit'].split(':')[0]} · {scope['topic'][:50]}]")
     if res.get("seconds"):
         parts.append(f":gray-badge[{res['seconds']} s]")
     if parts:
@@ -135,9 +132,6 @@ def answer_live(question, history, style, model):
                                  on_token=on_token, on_route=on_route, session=trace_session())
     status.empty()
     box.markdown(res["answer"] or "")              # stays on screen while the steps below run; replaced right after
-    units = common.active_syllabus_units()
-    if units and res["route"]["type"] != "chitchat":
-        res["scope"] = syllabus.scope(res["route"]["standalone_query"], units)
     if res.get("citations_ok") and not res.get("abstained"):
         by_id = retrieve.load_state()["by_id"]
         activity.log_question(question, [by_id[s["chunk_id"]]["source_id"] for s in res["sources"] if s.get("chunk_id") in by_id])
@@ -208,7 +202,7 @@ def export_menu(msgs):
 def welcome(n_src):
     """Empty chat: what is loaded, and some questions to start with."""
     chunks = retrieve.load_state()["chunks"]
-    due = flashcards.stats(flashcards.load())["due"]
+    due = flashcards.stats(common.flashcard_deck()[0])["due"]
     common.stats_row([(n_src, "sources in use"), (len(chunks), "passages indexed"),
                       (len({c["source_id"] for c in chunks if c["role"] == "pyq"}), "past papers"), (due, "flashcards due")])
     if n_src == 0:

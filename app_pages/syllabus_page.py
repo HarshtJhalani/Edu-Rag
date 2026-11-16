@@ -72,7 +72,7 @@ def show_units(units, cov, course_map):
 
 
 def page():
-    common.page_start("Syllabus coverage", "Your syllabus topics, and the slides that cover each one. Questions in the chat are also tagged with their unit.")
+    common.page_start("Syllabus coverage", "Your syllabus topics, and the slides that cover each one.")
     sylls = [s for s in common.sources() if s["role"] == "syllabus"]
     if not sylls:
         st.info("Upload your syllabus on the **Library** page (choose **Syllabus** as the file type).")
