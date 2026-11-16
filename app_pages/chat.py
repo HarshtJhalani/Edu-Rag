@@ -3,12 +3,16 @@ import random
 import re
 
 import time
+from pathlib import Path
 
 import streamlit as st
 
 from edu_rag import activity, chunking, config, export, flashcards, ollama_client, retrieve, router, syllabus, web, tracing
 
 from . import common
+
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
+AVATARS = {"user": ":material/person:", "assistant": str(ASSETS / "icon.svg")}   # replace Streamlit's red and orange defaults
 
 ROUTE_LABELS = {"definition": "Definition", "conceptual": "Explanation", "compare": "Comparison", "followup": "Follow-up",
                 "chitchat": "Small talk"}
@@ -241,7 +245,7 @@ def page():
     question = welcome(n_src) if not msgs else None
 
     for i, msg in enumerate(msgs):
-        with st.chat_message(msg["role"]):
+        with st.chat_message(msg["role"], avatar=AVATARS[msg["role"]]):
             if msg["role"] == "user":
                 st.markdown(msg["content"])
             else:
@@ -251,9 +255,9 @@ def page():
     if question:
         history = [{"role": m["role"], "content": m["content"]} for m in msgs]
         msgs.append({"role": "user", "content": question})
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar=AVATARS["user"]):
             st.markdown(question)
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar=AVATARS["assistant"]):
             res, hits = answer_live(question, history, style, model)
             msg = {"role": "assistant", "content": res["answer"] or "", "result": res, "past_papers": hits}
             msgs.append(msg)
