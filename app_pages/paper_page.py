@@ -1,6 +1,7 @@
 """Question paper: a new paper in the pattern of the student's previous-year papers, written from their slides,
 weighted towards the topics those papers ask most. Answer key, PDF downloads, and a timed attempt in Exam mode."""
 import re
+import threading
 import time
 
 import streamlit as st
@@ -9,11 +10,49 @@ from edu_rag import paper
 
 from . import common
 
+# Matching past questions to slides takes about 30 s on the GPU (longer on the processor), so it no longer blocks the
+# page: it starts in a thread as soon as a subject and files are chosen, and Generate waits for it only if it is not
+# done yet. One result per (papers, files, units, course), kept for the life of the app process.
+FREQ = {}            # key -> {"done": Event, "result": dict | None, "error": str | None}
+FREQ_LOCK = threading.Lock()
 
-@st.cache_data(show_spinner=False)
-def frequency(pyq_ids, evidence_ids, units_key, course=None):
-    units = [u for u in common.active_syllabus_units() if not course or u.get("course") == course]
-    return paper.topic_frequency(list(pyq_ids), sources=list(evidence_ids), units=units or None)
+
+def start_frequency(key, units):
+    """Start matching for this choice unless it is already running or done. Safe to call on every rerun."""
+    with FREQ_LOCK:
+        if key in FREQ and not FREQ[key]["error"]:
+            return FREQ[key]
+        entry = FREQ[key] = {"done": threading.Event(), "result": None, "error": None}
+    pyq_ids, files = key[0], key[1]
+
+    def run():
+        try:
+            entry["result"] = paper.topic_frequency(list(pyq_ids), sources=list(files), units=units or None)
+        except Exception as e:                      # shown when the student generates a paper
+            entry["error"] = f"{type(e).__name__}: {e}"
+        entry["done"].set()
+    threading.Thread(target=run, daemon=True, name="edu-rag-paper-frequency").start()
+    return entry
+
+
+def wait_frequency(entry):
+    """For the paper job: the matching result, waiting for it if it is still running."""
+    entry["done"].wait()
+    if entry["error"]:
+        raise RuntimeError(f"Matching past questions failed: {entry['error']}")
+    return entry["result"]
+
+
+@st.fragment(run_every=2)
+def frequency_box(entry):
+    """The past-topics expander; says it is still reading until the matching is done, then shows the chart."""
+    with st.expander("What your past papers ask most"):
+        if not entry["done"].is_set():
+            st.caption("Reading your past papers... You can generate a paper meanwhile.")
+        elif entry["error"]:
+            st.caption(f"Could not match the past questions: {entry['error']}")
+        else:
+            frequency_card(entry["result"])
 
 
 def frequency_card(freq):
@@ -97,14 +136,14 @@ def page():
         return
     with st.spinner("Reading the paper's pattern..."):
         bp = paper.blueprint_for(src["source_id"], model=model)
-    with st.spinner("Matching past questions to your slides..."):
-        freq = frequency(tuple(s["source_id"] for s in pyqs), tuple(files), str([u["name"] for u in units]), course)
+    match_units = [u for u in common.active_syllabus_units() if not course or u.get("course") == course]
+    entry = start_frequency((tuple(s["source_id"] for s in pyqs), tuple(files), str([u["name"] for u in units]), course),
+                            match_units)
     marks = " · ".join(f"{s['name']}: {len(s['questions'])} × {'/'.join(map(str, sorted({q['marks'] for q in s['questions']})))}"
                        for s in bp["sections"])
     st.caption(f"Pattern: {sum(len(s['questions']) for s in bp['sections'])} questions, {bp['total_marks']} marks, "
                f"{bp['duration_minutes'] // 60} h {bp['duration_minutes'] % 60:02d} min · {marks}")
-    with st.expander("What your past papers ask most"):
-        frequency_card(freq)
+    frequency_box(entry)
     if st.button("Generate a new paper" if qp is None else "Generate another paper", type="primary", use_container_width=True,
                  disabled=common.running("paper")):
         sources, seed, narrow = files, int(time.time()), course is None
@@ -112,10 +151,14 @@ def page():
         def keep(result):
             st.session_state.qpaper = result
             st.session_state.pop("qpaper_key", None)
-        common.start_job("paper", "Question paper",
-                         lambda progress: paper.make(bp, freq, sources=sources, model=model, seed=seed, difficulty=level, only_asked_decks=narrow,
-                                                     course=course, progress=lambda i, n: progress(i, n, f"section {i} of {n} written")),
-                         keep)
+        def work(progress, entry=entry):
+            if not entry["done"].is_set():
+                progress(0, 0, "matching past questions to your slides")
+            freq = wait_frequency(entry)
+            progress(0, 0, "writing the paper")
+            return paper.make(bp, freq, sources=sources, model=model, seed=seed, difficulty=level, only_asked_decks=narrow,
+                              course=course, progress=lambda i, n: progress(i, n, f"section {i} of {n} written"))
+        common.start_job("paper", "Question paper", work, keep)
         st.rerun()
     common.job_progress("paper")                   # nothing unless the job exists
     common.job_progress("paper_key")
