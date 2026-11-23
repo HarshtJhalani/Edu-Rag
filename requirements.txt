@@ -1,3 +1,6 @@
+# this project itself (src/edu_rag), so `pip install -r requirements.txt` is the only install step
+-e .
+
 # core
 numpy
 requests

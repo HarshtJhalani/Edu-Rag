@@ -1,8 +1,13 @@
 """Edu-RAG: Streamlit app. Run with start.bat (or: streamlit run app.py). Pages live in app_pages/."""
 import subprocess
+import sys
 from pathlib import Path
 
-import streamlit as st
+SRC = Path(__file__).resolve().parent / "src"
+if str(SRC) not in sys.path:                      # the package lives in src/edu_rag: found even without `pip install -e .`
+    sys.path.insert(0, str(SRC))
+
+import streamlit as st  # noqa: E402
 
 from app_pages import (chat, cheatsheet_page, common, exam_page, flashcards_page, library_page, paper_page, quiz_page,
                        syllabus_page)

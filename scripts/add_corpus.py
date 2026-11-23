@@ -4,8 +4,10 @@ Files already in the library (same name) are skipped, so the script can simply b
 """
 import sys
 import time
+from pathlib import Path
 
-from edu_rag import config, index, ingest, library
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))   # works without `pip install -e .`
+from edu_rag import config, index, ingest, library  # noqa: E402
 
 CORPUS = config.ROOT / "Corpus"
 PAST_PAPERS = {"solved_python_exam.docx"}           # role pyq; everything else is lecture material

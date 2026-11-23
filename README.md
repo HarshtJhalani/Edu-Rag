@@ -67,25 +67,123 @@ layer is still used. On a machine with a GPU, the sidebar's **Run on** toggle mo
 
 ## Setup
 
+Tested on Windows 10/11. The commands below are for the Command Prompt (`cmd`); PowerShell differences are noted.
+
+### 1. Install the prerequisites
+
+| What | Where | Check it worked |
+|---|---|---|
+| Python 3.11 or newer (tick **Add python.exe to PATH** in the installer) | [python.org/downloads](https://www.python.org/downloads/) | `python --version` |
+| Git (optional; you can also download the ZIP from GitHub) | [git-scm.com](https://git-scm.com) | `git --version` |
+| Ollama (the app can also offer to install it on first launch with `winget`) | [ollama.com/download](https://ollama.com/download) | `ollama --version` |
+
+### 2. Get the code
+
 ```bash
 git clone <this repo>
-cd Edu-Rag
-python -m venv rp
-rp\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
 ```
+```bash
+cd Edu-Rag
+```
+
+Keep the folder structure as it is: the code must stay in `src/edu_rag`.
+
+### 3. Create the virtual environment
+
+The environment must be called `rp` and sit inside the `Edu-Rag` folder, because `start.bat` looks for it there.
+
+```bash
+python -m venv rp
+```
+```bash
+rp\Scripts\activate
+```
+
+In PowerShell use `rp\Scripts\Activate.ps1`. If PowerShell refuses to run it, either use `cmd`, or allow local scripts once with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+
+### 4. Install the packages
+
+Run this from the `Edu-Rag` folder with the environment active. It installs every dependency and the project itself
+(`requirements.txt` starts with `-e .`):
+
+```bash
+python -m pip install --upgrade pip
+```
+```bash
+pip install -r requirements.txt
+```
+
+The first install downloads a few hundred megabytes (Chroma, Streamlit, MLflow, OCR and Office readers) and can take several minutes.
+
+### 5. Check the install
+
+```bash
+python -c "import edu_rag, streamlit, chromadb; print('Edu-RAG install OK')"
+```
+
+### 6. Start Ollama
+
+Ollama usually starts by itself after installation (look for its icon in the system tray). If not, run `ollama serve` in a separate
+window and leave it open. The models are downloaded by the app on first launch (step 8), so nothing else is needed here.
+To download them in advance instead (about 8 GB on a GPU machine):
+
+```bash
+ollama pull qwen2.5:7b-instruct
+```
+```bash
+ollama pull bge-m3
+```
+```bash
+ollama pull qwen3-vl:4b-instruct-q4_K_M
+```
+
+Without an NVIDIA GPU, pull `qwen2.5:3b-instruct` and `bge-m3` only (about 3.1 GB); see [Running without a GPU](#running-without-a-gpu).
 
 ## Run
 
-Double-click **`start.bat`**, or:
+Double-click **`start.bat`** in the `Edu-Rag` folder. It uses the `rp` environment, starts the app and opens it in the browser
+(normally at http://localhost:8501). Or, with the environment active:
 
 ```bash
-rp\Scripts\python.exe -m streamlit run app.py
+python -m streamlit run app.py
 ```
 
-On first launch the setup screen checks Ollama, the GPU and the models. Then open **Library** and add your
-slides (and optionally past papers and a syllabus). Course material is **not** part of this repository.
+`start.bat` sets `EDU_RAG_TRACE=0`, so it runs without tracing. To record traces (see [Tracing](#tracing-llmops)), start the app
+with the second command instead, and view them with `trace_ui.bat`.
+
+### First launch
+
+1. The setup screen checks that Ollama is installed and running, detects the GPU and its memory, and chooses the 7B or 3B answer model.
+2. It shows the total download size of the missing models and downloads them only after you confirm.
+3. Open **Library** and add your material: lecture slides and notes as **Lecture slides / textbook / notes**, previous-year papers as
+   **Previous-year question papers**, and the syllabus as **Syllabus**. Scanned pages are read with OCR, so the first upload of a
+   large file can take several minutes.
+4. Ask a question on the **Ask** page.
+
+Course material is **not** part of this repository; everything you add is stored in `data/` on your computer.
+
+### Updating
+
+```bash
+git pull
+```
+```bash
+pip install -r requirements.txt
+```
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `No module named 'edu_rag'` | Run `pip install -r requirements.txt` from the `Edu-Rag` folder with `rp` active. The app also finds `src/edu_rag` by itself, so this should only appear in your own scripts. Do not move `edu_rag` out of `src`. |
+| `No module named 'streamlit'` (or another package) | The environment is not active, or step 4 was skipped. Run `rp\Scripts\activate`, then step 4. |
+| `start.bat` closes at once or says Python was not found | The environment is missing or not called `rp`. Repeat step 3 inside the `Edu-Rag` folder. |
+| PowerShell will not activate the environment | Use `cmd`, or run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. |
+| Setup screen says Ollama is not running | Start Ollama from the Start menu, or run `ollama serve` in another window, then press the check again. |
+| Answers are very slow on a GPU machine | Check the sidebar's **Run on** is set to GPU, and that no other program is using the GPU. |
+| Port 8501 is already in use | Another copy is running: close it, or run `python -m streamlit run app.py --server.port 8502`. |
+| A new file gives "Your materials don't cover this" | Wait until the upload finishes (progress in the sidebar), and check the file is switched on in **Library**. |
 
 ## Results
 
